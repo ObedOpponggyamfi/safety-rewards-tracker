@@ -1,7 +1,7 @@
 """Safety Rewards Tracker -- Python standard-library MVP.
 
 Run:
-    python app.py            # serves http://localhost:8000
+    python app.py            # serves http://localhost:8090
 
 No npm, no pip, no framework. Server-rendered HTML/CSS with JSON persistence.
 """
@@ -11,6 +11,7 @@ import io
 import os
 import secrets
 import webbrowser
+from collections import Counter
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Timer
@@ -20,7 +21,7 @@ import adinkra
 import domain as D
 import render as R
 
-PORT = int(os.environ.get("PORT", "8000"))
+PORT = int(os.environ.get("PORT", "8090"))
 SESSIONS = {}  # token -> user_id
 
 
@@ -98,12 +99,12 @@ def body_dashboard(user, qs):
         pts = D.dept_points(dept["key"], year=yr, month=mo)
         dept_html = R.section("My department",
             '<div class="card adinkra-card">%s<div class="adinkra-meta">'
-            '<h3>%s</h3><div class="meaning">%s</div><div class="motto">%s</div>'
+            '<h3>%s</h3><div class="kpi-mini">%s</div><div class="meaning">%s</div><div class="motto">%s</div>'
             '<div class="hint" style="margin-top:8px">Points this month: <strong>%d</strong> · '
             'Active employees: <strong>%d</strong> · Monthly limit: <strong>%s</strong> · '
             'Used: <strong>%s</strong></div></div></div>' % (
                 R.symbol_img(dept["commons_file"], 84), R.esc(dept["adinkra_name"]),
-                R.esc(dept["meaning"]), R.esc(dept["motto"]), pts,
+                R.esc(dept.get("department", "")), R.esc(dept["meaning"]), R.esc(dept["motto"]), pts,
                 dept["active_employees"], D.fmt_money(limit), D.fmt_money(used)))
 
     # Action items by role.
@@ -113,9 +114,10 @@ def body_dashboard(user, qs):
     if user["role"] in D.REWARD_APPROVE_ROLES and pending_rewards:
         todo.append('<a class="btn gold" href="/rewards/approvals">Reward approvals (%d)</a>' % pending_rewards)
     if user["role"] in D.REWARD_RELEASE_ROLES:
-        rel = len([r for r in D.DB["reward_requests"] if r["status"] == "approved"])
-        if rel:
-            todo.append('<a class="btn gold" href="/rewards/releases">Releases pending (%d)</a>' % rel)
+        fin = len([r for r in D.DB["reward_requests"]
+                   if r["status"] in ("pending_finance", "finance_approved")])
+        if fin:
+            todo.append('<a class="btn gold" href="/rewards/releases">Finance queue (%d)</a>' % fin)
     todo.append('<a class="btn" href="/report/observation">Report an observation</a>')
     todo.append('<a class="btn ghost" href="/league">Adinkra League</a>')
     todo_html = R.section("Quick actions", '<div class="pill-row">%s</div>' % "".join(todo))
@@ -132,7 +134,7 @@ def body_observation_form(user, qs):
     cats = ["Unsafe act", "Unsafe condition", "Good practice", "Housekeeping", "PPE"]
     cat_opts = "".join("<option>%s</option>" % c for c in cats)
     sel_dept = lambda k: ' selected' if k == user["dept_key"] else ''
-    dept_opts = "".join('<option value="%s"%s>%s</option>' % (d["key"], sel_dept(d["key"]), R.esc(d["adinkra_name"])) for d in D.DB["departments"])
+    dept_opts = "".join('<option value="%s"%s>%s</option>' % (d["key"], sel_dept(d["key"]), R.esc("%s — %s" % (d["adinkra_name"], d.get("department", "")))) for d in D.DB["departments"])
     form = """<form method="post" action="/report/observation" class="card form-card">
       <div class="row-inline">
         <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
@@ -150,7 +152,7 @@ def body_observation_form(user, qs):
 
 def body_hid_form(user, qs):
     sel_dept = lambda k: ' selected' if k == user["dept_key"] else ''
-    dept_opts = "".join('<option value="%s"%s>%s</option>' % (d["key"], sel_dept(d["key"]), R.esc(d["adinkra_name"])) for d in D.DB["departments"])
+    dept_opts = "".join('<option value="%s"%s>%s</option>' % (d["key"], sel_dept(d["key"]), R.esc("%s — %s" % (d["adinkra_name"], d.get("department", "")))) for d in D.DB["departments"])
     form = """<form method="post" action="/report/hid" class="card form-card">
       <div class="row-inline">
         <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
@@ -166,7 +168,7 @@ def body_hid_form(user, qs):
 
 def body_incident_form(user, qs):
     sel_dept = lambda k: ' selected' if k == user["dept_key"] else ''
-    dept_opts = "".join('<option value="%s"%s>%s</option>' % (d["key"], sel_dept(d["key"]), R.esc(d["adinkra_name"])) for d in D.DB["departments"])
+    dept_opts = "".join('<option value="%s"%s>%s</option>' % (d["key"], sel_dept(d["key"]), R.esc("%s — %s" % (d["adinkra_name"], d.get("department", "")))) for d in D.DB["departments"])
     form = """<form method="post" action="/report/incident" class="card form-card">
       <div class="row-inline">
         <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
@@ -195,7 +197,7 @@ def body_review(user, qs):
             <button class="btn bad sm">Reject</button></form>"""
             % (o["id"], D.POINTS["observation"], o["id"]))
         rows.append([D.fmt_date(o["ts"]), R.esc(rep["name"] if rep else "?"),
-                     R.esc(D.dept_name(o["dept_key"])), R.esc(o["category"]),
+                     R.dept_label_html(o["dept_key"]), R.esc(o["category"]),
                      R.esc(o["location"]), actions])
     return R.section("Supervisor review & approval queue",
                      R.table(["Date", "Reporter", "Department", "Category", "Location", "Decision"], rows, "Queue is clear."))
@@ -204,7 +206,7 @@ def body_review(user, qs):
 def body_actions(user, qs):
     create = ""
     if user["role"] in D.REVIEW_ROLES:
-        dept_opts = "".join('<option value="%s">%s</option>' % (d["key"], R.esc(d["adinkra_name"])) for d in D.DB["departments"])
+        dept_opts = "".join('<option value="%s">%s</option>' % (d["key"], R.esc("%s — %s" % (d["adinkra_name"], d.get("department", "")))) for d in D.DB["departments"])
         worker_opts = "".join('<option value="%d">%s</option>' % (u["id"], R.esc(u["name"])) for u in D.DB["users"] if u["role"] == "worker")
         create = R.section("Raise a corrective action", """<form method="post" action="/actions" class="card form-card">
           <input type="hidden" name="action" value="create">
@@ -229,11 +231,11 @@ def body_actions(user, qs):
         close_btn = """<form class="inline" method="post" action="/actions">
             <input type="hidden" name="action" value="close"><input type="hidden" name="id" value="%d">
             <button class="btn ok sm">Close +%d</button></form>""" % (a["id"], D.POINTS["action_closed"])
-        rows.append([R.esc(D.dept_name(a["dept_key"])), R.esc(owner["name"] if owner else "?"),
+        rows.append([R.dept_label_html(a["dept_key"]), R.esc(owner["name"] if owner else "?"),
                      R.esc(a["description"]), due_cell, close_btn])
     open_tbl = R.table(["Department", "Owner", "Action", "Due", ""], rows, "No open actions.")
     closed = [a for a in D.DB["corrective_actions"] if a["status"] == "closed"][-8:][::-1]
-    crows = [[R.esc(D.dept_name(a["dept_key"])), R.esc((D.user(a["owner_id"]) or {}).get("name", "?")),
+    crows = [[R.dept_label_html(a["dept_key"]), R.esc((D.user(a["owner_id"]) or {}).get("name", "?")),
               R.esc(a["description"]), D.fmt_date(a.get("closed_ts") or a["ts"])] for a in closed]
     closed_tbl = R.table(["Department", "Owner", "Action", "Closed"], crows, "No closed actions yet.")
     return create + R.section("Open corrective actions", open_tbl) + R.section("Recently closed", closed_tbl)
@@ -251,7 +253,7 @@ def body_points(user, qs):
     for p in entries[:200]:
         u = D.user(p["user_id"])
         rows.append([D.fmt_date(p["ts"]), R.esc(u["name"] if u else "?"),
-                     R.esc(D.dept_name(p["dept_key"])), R.esc(p["reason"]),
+                     R.dept_label_html(p["dept_key"]), R.esc(p["reason"]),
                      '<strong>+%d</strong>' % p["points"]])
     dept_filter = ""
     if user["role"] != "worker":
@@ -288,10 +290,14 @@ def body_rewards(user, qs):
     mine = [r for r in D.DB["reward_requests"] if r["user_id"] == user["id"]]
     mine.sort(key=lambda r: r["ts"], reverse=True)
     mrows = [[D.fmt_date(r["ts"]), R.esc(D.reward(r["reward_id"])["name"]), "%d pts" % r["point_cost"],
-              D.fmt_money(r["cash_value"]), R.status_badge(r["status"])] for r in mine]
+              D.fmt_money(r["cash_value"]), R.status_badge(r["status"]), R.reward_trail(r) or "&mdash;"]
+             for r in mine]
     my_section = ""
     if user["role"] == "worker":
-        my_section = R.section("My reward requests", R.table(["Date", "Reward", "Cost", "Value", "Status"], mrows, "No requests yet."))
+        my_section = (R.reward_flow_diagram()
+                      + R.section("My reward requests",
+                                  R.table(["Date", "Reward", "Cost", "Value", "Status", "Progress"],
+                                          mrows, "No requests yet.")))
     return (head and '<div class="grid cols-3" style="margin-bottom:18px">%s</div>' % head or "") + catalogue + my_section
 
 
@@ -302,38 +308,62 @@ def body_reward_approvals(user, qs):
     for r in pending:
         u = D.user(r["user_id"])
         bal = D.user_balance(r["user_id"])
-        actions = """<form class="inline" method="post" action="/rewards/approvals">
-            <input type="hidden" name="id" value="%d"><input type="hidden" name="action" value="approve">
-            <button class="btn ok sm">Approve</button></form>
+        decide = """<form class="inline" method="post" action="/rewards/approvals">
+            <input type="hidden" name="id" value="%d">
+            <button class="btn ok sm" name="action" value="approve">Approve</button></form>
           <form class="inline" method="post" action="/rewards/approvals">
-            <input type="hidden" name="id" value="%d"><input type="hidden" name="action" value="reject">
-            <button class="btn bad sm">Reject</button></form>""" % (r["id"], r["id"])
-        rows.append([D.fmt_date(r["ts"]), R.esc(u["name"] if u else "?"), R.esc(D.dept_name(r["dept_key"])),
+            <input type="hidden" name="id" value="%d">
+            <input name="reason" placeholder="Reason (if rejecting)" style="width:160px;display:inline-block">
+            <button class="btn bad sm" name="action" value="reject">Reject</button></form>""" % (r["id"], r["id"])
+        rows.append([D.fmt_date(r["ts"]), R.esc(u["name"] if u else "?"), R.dept_label_html(r["dept_key"]),
                      R.esc(D.reward(r["reward_id"])["name"]), "%d pts" % r["point_cost"],
-                     "%d pts" % bal, actions])
-    return R.section("Reward approvals (Admin)",
-        R.table(["Date", "Worker", "Department", "Reward", "Cost", "Balance", "Decision"], rows, "Nothing awaiting approval."))
+                     "%d pts" % bal, decide])
+    note = '<p class="hint">Step 2 of the workflow. Approved requests move on to the Finance Manager.</p>'
+    return R.reward_flow_diagram("pending_admin") + note + R.section("Reward approvals · Admin",
+        R.table(["Date", "Worker", "Department", "Reward", "Cost", "Balance", "Decision"], rows, "Nothing awaiting admin approval."))
 
 
-def body_reward_releases(user, qs):
-    approved = [r for r in D.DB["reward_requests"] if r["status"] == "approved"]
-    approved.sort(key=lambda r: r["ts"])
+def body_reward_finance(user, qs):
     yr, mo = D.today().year, D.today().month
-    rows = []
-    for r in approved:
+
+    # Step 3 -- Finance Manager approval of admin-approved requests.
+    pend = [r for r in D.DB["reward_requests"] if r["status"] == "pending_finance"]
+    pend.sort(key=lambda r: r["ts"])
+    prows = []
+    for r in pend:
+        u = D.user(r["user_id"])
+        decide = """<form class="inline" method="post" action="/rewards/releases">
+            <input type="hidden" name="id" value="%d">
+            <button class="btn ok sm" name="action" value="fin_approve">Approve</button></form>
+          <form class="inline" method="post" action="/rewards/releases">
+            <input type="hidden" name="id" value="%d">
+            <input name="reason" placeholder="Reason (if rejecting)" style="width:160px;display:inline-block">
+            <button class="btn bad sm" name="action" value="reject">Reject</button></form>""" % (r["id"], r["id"])
+        prows.append([D.fmt_date(r["ts"]), R.esc(u["name"] if u else "?"), R.dept_label_html(r["dept_key"]),
+                      R.esc(D.reward(r["reward_id"])["name"]), D.fmt_money(r["cash_value"]), decide])
+    finance_tbl = R.section("Finance approval · step 3",
+        R.table(["Submitted", "Worker", "Department", "Reward", "Value", "Decision"], prows,
+                "Nothing awaiting finance approval."))
+
+    # Step 4 -- release the finance-approved rewards (budget check shown).
+    appr = [r for r in D.DB["reward_requests"] if r["status"] == "finance_approved"]
+    appr.sort(key=lambda r: r["ts"])
+    rrows = []
+    for r in appr:
         u = D.user(r["user_id"])
         dept = D.department(r["dept_key"])
         limit = D.dept_monthly_limit(dept) if dept else 0
         used = D.dept_budget_used(r["dept_key"], yr, mo)
-        within = (used + r["cash_value"]) <= limit
-        flag = R.badge("Within limit", "ok") if within else R.badge("Over dept limit", "bad")
+        flag = R.badge("Within limit", "ok") if (used + r["cash_value"]) <= limit else R.badge("Over dept limit", "bad")
         btn = """<form class="inline" method="post" action="/rewards/releases">
-            <input type="hidden" name="id" value="%d"><input type="hidden" name="action" value="release">
-            <button class="btn ok sm">Release %s</button></form>""" % (r["id"], D.fmt_money(r["cash_value"]))
-        rows.append([D.fmt_date(r["ts"]), R.esc(u["name"] if u else "?"), R.esc(D.dept_name(r["dept_key"])),
-                     R.esc(D.reward(r["reward_id"])["name"]), D.fmt_money(r["cash_value"]), flag, btn])
-    return R.section("Finance approval & reward release",
-        R.table(["Date", "Worker", "Department", "Reward", "Value", "Dept budget", "Release"], rows, "No approved requests awaiting release."))
+            <input type="hidden" name="id" value="%d">
+            <button class="btn ok sm" name="action" value="release">Release %s</button></form>""" % (r["id"], D.fmt_money(r["cash_value"]))
+        rrows.append([D.fmt_date(r["ts"]), R.esc(u["name"] if u else "?"), R.dept_label_html(r["dept_key"]),
+                      R.esc(D.reward(r["reward_id"])["name"]), D.fmt_money(r["cash_value"]), flag, btn])
+    release_tbl = R.section("Reward release · step 4",
+        R.table(["Submitted", "Worker", "Department", "Reward", "Value", "Dept budget", "Release"], rrows,
+                "No finance-approved requests awaiting release."))
+    return R.reward_flow_diagram("finance_approved") + finance_tbl + release_tbl
 
 
 # ---- Leaderboards / recognition ----
@@ -376,8 +406,7 @@ def league_table(year, month, limit=None):
         over = r["used"] > r["limit"]
         pct = 0 if r["limit"] == 0 else min(100, round(100 * r["used"] / r["limit"]))
         bar = '<div class="progress%s"><span style="width:%d%%"></span></div>' % (" over" if over else "", pct)
-        symbol = '<div class="symbol-cell">%s<div><strong>%s</strong><div class="kpi-mini">%s</div></div></div>' % (
-            R.symbol_img(r["commons_file"], 40), R.esc(r["adinkra_name"]), R.esc(r["motto"]))
+        symbol = R.dept_symbol_cell(r["dept_key"], 40)
         rows.append([R.champion(i), symbol, "<strong>%d</strong>" % r["points"],
                      "%d" % r["active_employees"], D.fmt_money(r["limit"]),
                      "%s%s" % (D.fmt_money(r["used"]), bar)])
@@ -428,7 +457,7 @@ def body_leaderboard(user, qs):
         rows = []
         for i, r in enumerate(data[:50], start=1):
             tag = R.badge("Contractor", "muted") if r["is_contractor"] else ""
-            rows.append([R.champion(i), R.esc(r["name"]) + " " + tag, R.esc(D.dept_name(r["dept_key"])),
+            rows.append([R.champion(i), R.esc(r["name"]) + " " + tag, R.dept_label_html(r["dept_key"]),
                          "<strong>%d</strong>" % r["points"]])
         body = R.table(["#", "Worker", "Department", "Points"], rows, "No points in this period.")
 
@@ -453,7 +482,7 @@ def body_weekly(user, qs):
             continue
         rows = []
         for i, r in enumerate(data[:5], start=1):
-            rows.append([R.champion(i), R.esc(r["name"]), R.esc(D.dept_name(r["dept_key"])),
+            rows.append([R.champion(i), R.esc(r["name"]), R.dept_label_html(r["dept_key"]),
                          "<strong>%d</strong>" % r["points"]])
         label = "Week %d in %s" % (wk, D.month_name(mo))
         blocks += R.section(label, R.table(["#", "Worker", "Department", "Points"], rows))
@@ -467,13 +496,18 @@ def body_adinkra(user, qs):
     cards = ""
     for d in D.DB["departments"]:
         cards += """<div class="card adinkra-card">%s
-          <div class="adinkra-meta"><h3>%s</h3><div class="meaning">%s</div>
+          <div class="adinkra-meta"><h3>%s</h3>
+          <span class="who-role">%s</span>
+          <div class="meaning" style="margin-top:6px">%s</div>
           <div class="motto">&ldquo;%s&rdquo;</div>
           <div class="hint" style="margin-top:6px">%d employees · <a href="%s" target="_blank" rel="noopener">symbol source</a></div>
           </div></div>""" % (
-            R.symbol_img(d["commons_file"], 76), R.esc(d["adinkra_name"]), R.esc(d["meaning"]),
-            R.esc(d["motto"]), d["employee_count"], R.esc(adinkra.file_page_url(d["commons_file"])))
-    note = '<p class="hint">Every department is identified only by its Adinkra symbol, name, meaning and motto. Symbols are real files hosted on Wikimedia Commons.</p>'
+            R.symbol_img(d["commons_file"], 76), R.esc(d["adinkra_name"]), R.esc(d.get("department", "")),
+            R.esc(d["meaning"]), R.esc(d["motto"]), d["employee_count"],
+            R.esc(adinkra.file_page_url(d["commons_file"])))
+    note = ('<p class="hint">Each department pairs a real operational unit with its Adinkra emblem, '
+            'name, meaning and motto &mdash; the Adinkra is always shown with its department attached. '
+            'Symbols are real files hosted on Wikimedia Commons.</p>')
     return note + R.section("Adinkra Safety Identity", '<div class="grid cols-2">%s</div>' % cards)
 
 
@@ -484,47 +518,155 @@ def body_league(user, qs):
     return intro + R.section("Adinkra League · %s %d" % (D.month_name(mo), yr), league_table(year=yr, month=mo))
 
 
+def _month_records(yr, mo):
+    """Pull every module's records for a month -- shared by the page and CSV."""
+    def closed_in(a):
+        ts = a.get("closed_ts")
+        if not ts:
+            return False
+        d = D.parse_dt(ts).date()
+        return d.year == yr and d.month == mo
+    today_iso = D.today().isoformat()
+    inc = D.records_in("incidents", yr, month=mo)
+    rq = D.records_in("reward_requests", yr, month=mo)
+    comp_spend = {}
+    for r in rq:
+        if r["status"] != "released":
+            continue
+        u = D.user(r["user_id"])
+        if u and u.get("company_id"):
+            comp_spend[u["company_id"]] = comp_spend.get(u["company_id"], 0) + r["cash_value"]
+    return {
+        "obs": D.records_in("safety_observations", yr, month=mo),
+        "haz": D.records_in("near_miss_hazard_reports", yr, month=mo, where=lambda x: x.get("type") == "Hazard"),
+        "nm": D.records_in("near_miss_hazard_reports", yr, month=mo, where=lambda x: x.get("type") == "Near miss"),
+        "inc": inc,
+        "lti": [i for i in inc if i.get("lti")],
+        "ca_opened": D.records_in("corrective_actions", yr, month=mo),
+        "ca_closed": [a for a in D.DB["corrective_actions"] if closed_in(a)],
+        "ca_open_now": [a for a in D.DB["corrective_actions"] if a["status"] == "open"],
+        "ca_overdue": [a for a in D.DB["corrective_actions"]
+                       if a["status"] == "open" and a.get("due") and a["due"] < today_iso],
+        "rq": rq,
+        "rq_released": [r for r in rq if r["status"] == "released"],
+        "reward_spend": sum(r["cash_value"] for r in rq if r["status"] == "released"),
+        "departments": D.department_leaderboard(year=yr, month=mo),
+        "contractors": D.contractor_leaderboard(year=yr, month=mo),
+        "comp_spend": comp_spend,
+    }
+
+
 def body_reports(user, qs):
     yr = qint(qs, "year", D.today().year)
     mo = qint(qs, "month", D.today().month)
     q = D.quarter_of_month(mo)
+    mlabel = "%s %d" % (D.month_name(mo), yr)
+    rep = _month_records(yr, mo)
+
     controls = """<form class="filter-bar" method="get">
       <div class="field"><label>Month</label>%s</div>
       <div class="field"><label>Quarter (auto from month)</label><div>%s</div></div>
       <div class="field"><label>Year</label><input name="year" value="%d" style="width:90px"></div>
       <button class="btn">Generate</button>
-      <a class="btn ghost" href="/reports.csv?%s">Export CSV</a>
-    </form>""" % (R.month_select("month", mo), R.quarter_box(mo), yr,
-                  urlencode({"year": yr, "month": mo}))
+      <a class="btn ghost" href="/reports.csv?%s">Export full report (CSV)</a>
+    </form>""" % (R.month_select("month", mo), R.quarter_box(mo), yr, urlencode({"year": yr, "month": mo}))
+    intro = ('<p class="hint">Auto-generated monthly reports for every module &mdash; <strong>%s</strong>. '
+             'The quarter (<strong>%s</strong>) is derived automatically from the selected month.</p>'
+             % (mlabel, D.quarter_label(q)))
 
-    def count_in(coll, month=None, quarter=None):
-        n = 0
-        for it in D.DB[coll]:
-            d = D.parse_dt(it["ts"]).date()
-            if d.year != yr:
-                continue
-            if month and d.month != month:
-                continue
-            if quarter and D.quarter_of_month(d.month) != quarter:
-                continue
-            n += 1
-        return n
+    def grid(*cards, cols=4):
+        return '<div class="grid cols-%d">%s</div>' % (cols, "".join(cards))
 
-    m_cards = '<div class="grid cols-4">%s%s%s%s</div>' % (
-        R.stat_card("Observations", count_in("safety_observations", month=mo)),
-        R.stat_card("Hazards / Near-miss", count_in("near_miss_hazard_reports", month=mo)),
-        R.stat_card("Incidents", count_in("incidents", month=mo)),
-        R.stat_card("Reward spend", D.fmt_money(D.budget_used(yr, month=mo))))
-    monthly = R.section("Monthly report · %s %d" % (D.month_name(mo), yr), m_cards)
+    def breakdown(items, key, title):
+        c = Counter((it.get(key) or "—") for it in items)
+        rows = [[R.esc(k), "%d" % v] for k, v in sorted(c.items(), key=lambda kv: (-kv[1], str(kv[0])))]
+        return R.table([title, "Count"], rows, "None recorded in %s." % mlabel)
 
-    q_cards = '<div class="grid cols-4">%s%s%s%s</div>' % (
-        R.stat_card("Observations", count_in("safety_observations", quarter=q)),
-        R.stat_card("Hazards / Near-miss", count_in("near_miss_hazard_reports", quarter=q)),
-        R.stat_card("Incidents", count_in("incidents", quarter=q)),
-        R.stat_card("Reward spend", D.fmt_money(D.budget_used(yr, quarter=q))))
-    quarterly = R.section("Quarterly report · %s %d (%s)" % (
-        D.quarter_label(q), yr, ", ".join(D.month_name(m) for m in D.quarter_months(q))), q_cards)
-    return controls + monthly + quarterly
+    # ---- Summary -----------------------------------------------------------
+    summary = R.section("Monthly summary · %s" % mlabel,
+        grid(R.stat_card("Safety Observations", len(rep["obs"])),
+             R.stat_card("HID (Hazards)", len(rep["haz"])),
+             R.stat_card("Near Misses", len(rep["nm"])),
+             R.stat_card("Incidents", len(rep["inc"])))
+        + '<div style="height:14px"></div>'
+        + grid(R.stat_card("Lost Time Injuries", len(rep["lti"])),
+               R.stat_card("Actions closed", len(rep["ca_closed"])),
+               R.stat_card("Reward requests", len(rep["rq"])),
+               R.stat_card("Reward spend", D.fmt_money(rep["reward_spend"]))))
+
+    # ---- Incidents / LTI / HID / Near Miss / Observations ------------------
+    obs_status = Counter(o["status"] for o in rep["obs"])
+    observations = R.section("Safety Observations",
+        grid(R.stat_card("Total", len(rep["obs"])),
+             R.stat_card("Approved", obs_status.get("approved", 0)),
+             R.stat_card("Pending review", obs_status.get("submitted", 0)), cols=3)
+        + breakdown(rep["obs"], "category", "By category"))
+
+    hid = R.section("HID — Hazard Reports",
+        grid(R.stat_card("Hazards reported", len(rep["haz"])), cols=3)
+        + breakdown(rep["haz"], "severity", "By severity"))
+
+    nearmiss = R.section("Near Misses",
+        grid(R.stat_card("Near misses", len(rep["nm"])), cols=3)
+        + breakdown(rep["nm"], "severity", "By severity"))
+
+    incidents = R.section("Incidents",
+        grid(R.stat_card("Total incidents", len(rep["inc"])),
+             R.stat_card("Lost Time Injuries", len(rep["lti"])),
+             R.stat_card("Non-LTI", len(rep["inc"]) - len(rep["lti"])), cols=3)
+        + breakdown(rep["inc"], "severity", "By severity"))
+
+    reset_by_inc = {e["incident_id"]: e for e in D.DB["point_reset_events"]}
+    lti_rows = [[D.fmt_date(i["ts"]), R.dept_label_html(i["dept_key"]), R.esc(i.get("location", "")),
+                 ("%d pts reset" % reset_by_inc[i["id"]]["points_reset"]) if i["id"] in reset_by_inc else "&mdash;"]
+                for i in rep["lti"]]
+    lti = R.section("Lost Time Injuries (LTI)",
+        R.table(["Date", "Department", "Location", "Point reset"], lti_rows,
+                "No LTIs recorded in %s — well done." % mlabel))
+
+    # ---- Corrective Actions ------------------------------------------------
+    actions = R.section("Corrective Actions",
+        grid(R.stat_card("Opened", len(rep["ca_opened"])),
+             R.stat_card("Closed", len(rep["ca_closed"])),
+             R.stat_card("Still open", len(rep["ca_open_now"])),
+             R.stat_card("Overdue", len(rep["ca_overdue"]))))
+
+    # ---- Rewards -----------------------------------------------------------
+    rstatus = Counter(r["status"] for r in rep["rq"])
+    rewards = R.section("Rewards",
+        grid(R.stat_card("Requests", len(rep["rq"])),
+             R.stat_card("Released", rstatus.get("released", 0)),
+             R.stat_card("Reward spend", D.fmt_money(rep["reward_spend"])), cols=3)
+        + R.table(["Workflow status", "Count"],
+                  [[R.status_badge(k), "%d" % v] for k, v in sorted(rstatus.items(), key=lambda kv: -kv[1])],
+                  "No reward requests in %s." % mlabel))
+
+    # ---- Budget ------------------------------------------------------------
+    mb = next((b for b in D.DB["monthly_reward_budgets"] if b["year"] == yr and b["month"] == mo), None)
+    qb = next((b for b in D.DB["quarterly_reward_budgets"] if b["year"] == yr and b["quarter"] == q), None)
+    m_amt = mb["amount"] if mb else 0
+    q_amt = qb["amount"] if qb else 0
+    budget = R.section("Budget",
+        grid(R.stat_card("Monthly budget", D.fmt_money(m_amt), mlabel),
+             R.stat_card("Used", D.fmt_money(D.budget_used(yr, month=mo))),
+             R.stat_card("Remaining", D.fmt_money(m_amt - D.budget_used(yr, month=mo))),
+             R.stat_card("%s budget remaining" % D.quarter_label(q),
+                         D.fmt_money(q_amt - D.budget_used(yr, quarter=q)))))
+
+    # ---- Departments -------------------------------------------------------
+    departments = R.section("Departments · %s" % mlabel, league_table(year=yr, month=mo))
+
+    # ---- Contractors -------------------------------------------------------
+    crows = []
+    for i, c in enumerate(rep["contractors"], start=1):
+        crows.append([R.champion(i), R.esc(c["name"]), "%d" % c["members"],
+                      "<strong>%d</strong>" % c["points"],
+                      D.fmt_money(rep["comp_spend"].get(c["company_id"], 0))])
+    contractors = R.section("Contractors · %s" % mlabel,
+        R.table(["#", "Contractor company", "Members", "Points", "Reward spend"], crows, "No contractor activity."))
+
+    return (controls + intro + summary + observations + hid + nearmiss + incidents
+            + lti + actions + rewards + budget + departments + contractors)
 
 
 def body_budgets(user, qs):
@@ -574,7 +716,7 @@ def body_budgets(user, qs):
     for d in D.DB["departments"]:
         limit = D.dept_monthly_limit(d)
         used = D.dept_budget_used(d["key"], yr, mo)
-        drows.append([R.esc(d["adinkra_name"]), "%d / %d" % (d["active_employees"], d["employee_count"]),
+        drows.append([R.dept_label_html(d["key"]), "%d / %d" % (d["active_employees"], d["employee_count"]),
                       D.fmt_money(D.BUDGET_PER_ACTIVE_WORKER), D.fmt_money(limit),
                       D.fmt_money(used), D.fmt_money(limit - used)])
     dept_tbl = R.section("Department reward limits (employee-based) · %s %d" % (D.month_name(mo), yr),
@@ -604,12 +746,13 @@ def body_admin(user, qs):
     for d in D.DB["departments"]:
         dept_rows += """<form class="inline" method="post" action="/admin" style="display:block;margin-bottom:8px">
             <input type="hidden" name="action" value="set_employees"><input type="hidden" name="dept_key" value="%s">
-            <span style="display:inline-block;width:180px"><strong>%s</strong></span>
+            <span style="display:inline-block;width:230px"><strong>%s</strong> <span class="kpi-mini">%s</span></span>
             Active <input name="active" type="number" min="0" value="%d" style="width:90px;display:inline-block">
             of <input name="total" type="number" min="0" value="%d" style="width:90px;display:inline-block">
             <button class="btn sm">Update limit</button>
             <span class="hint">limit = %s</span>
-          </form>""" % (d["key"], R.esc(d["adinkra_name"]), d["active_employees"], d["employee_count"],
+          </form>""" % (d["key"], R.esc(d["adinkra_name"]), R.esc(d.get("department", "")),
+                        d["active_employees"], d["employee_count"],
                         D.fmt_money(D.dept_monthly_limit(d)))
     emp = R.section("Department employees &rarr; reward limits", '<div class="card">%s</div>' % dept_rows)
     reset = R.section("Demo data", """<div class="card">
@@ -723,40 +866,69 @@ def post_reward_request(user, form):
         "id": D.next_id("reward_requests"), "ts": D.now_iso(), "user_id": user["id"],
         "dept_key": user["dept_key"], "reward_id": rw["id"], "point_cost": rw["point_cost"],
         "cash_value": rw["cash_value"], "status": "pending_admin",
-        "admin_id": None, "finance_id": None, "decided_ts": None})
+        "admin_id": None, "admin_ts": None, "finance_id": None, "finance_ts": None,
+        "released_by": None, "released_ts": None,
+        "reject_reason": None, "rejected_by": None, "reject_stage": None, "rejected_ts": None})
     D.save()
     return redirect("/rewards", "Reward requested. Awaiting admin approval.")
 
 
+def _reject(r, user, stage, form):
+    r["status"] = "rejected"
+    r["rejected_by"] = user["id"]
+    r["reject_stage"] = stage
+    r["reject_reason"] = q1(form, "reason") or "No reason provided."
+    r["rejected_ts"] = D.now_iso()
+
+
 def post_reward_approval(user, form):
+    """Step 2: Admin approves (-> Finance) or rejects with a reason."""
     if user["role"] not in D.REWARD_APPROVE_ROLES:
         return redirect("/rewards/approvals", "Not permitted.")
     r = next((x for x in D.DB["reward_requests"] if x["id"] == qint(form, "id")), None)
     if not r or r["status"] != "pending_admin":
         return redirect("/rewards/approvals", "Request not found.")
     if q1(form, "action") == "approve":
-        r["status"] = "approved"
+        r["status"] = "pending_finance"
         r["admin_id"] = user["id"]
-        msg = "Approved. Sent to Finance for release."
+        r["admin_ts"] = D.now_iso()
+        msg = "Approved by Admin. Sent to the Finance Manager."
     else:
-        r["status"] = "rejected"
         r["admin_id"] = user["id"]
+        r["admin_ts"] = D.now_iso()
+        _reject(r, user, "admin", form)
         msg = "Request rejected."
-    r["decided_ts"] = D.now_iso()
     D.save()
     return redirect("/rewards/approvals", msg)
 
 
-def post_reward_release(user, form):
+def post_reward_finance(user, form):
+    """Steps 3 & 4: Finance approves/rejects, then releases the reward."""
     if user["role"] not in D.REWARD_RELEASE_ROLES:
         return redirect("/rewards/releases", "Not permitted.")
     r = next((x for x in D.DB["reward_requests"] if x["id"] == qint(form, "id")), None)
-    if not r or r["status"] != "approved":
+    if not r:
         return redirect("/rewards/releases", "Request not found.")
-    r["status"] = "released"
-    r["finance_id"] = user["id"]
+    action = q1(form, "action")
+    if action == "fin_approve" and r["status"] == "pending_finance":
+        r["status"] = "finance_approved"
+        r["finance_id"] = user["id"]
+        r["finance_ts"] = D.now_iso()
+        msg = "Finance approved. Ready for release."
+    elif action == "reject" and r["status"] == "pending_finance":
+        r["finance_id"] = user["id"]
+        r["finance_ts"] = D.now_iso()
+        _reject(r, user, "finance", form)
+        msg = "Request rejected by Finance."
+    elif action == "release" and r["status"] == "finance_approved":
+        r["status"] = "released"
+        r["released_by"] = user["id"]
+        r["released_ts"] = D.now_iso()
+        msg = "Reward released. %s charged to the budget." % D.fmt_money(r["cash_value"])
+    else:
+        msg = "No change."
     D.save()
-    return redirect("/rewards/releases", "Reward released. %s charged to the budget." % D.fmt_money(r["cash_value"]))
+    return redirect("/rewards/releases", msg)
 
 
 def post_budgets(user, form):
@@ -865,33 +1037,42 @@ def csv_reports(user, qs):
     yr = qint(qs, "year", D.today().year)
     mo = qint(qs, "month", D.today().month)
     q = D.quarter_of_month(mo)
+    rep = _month_records(yr, mo)
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["Scope", "Period", "Observations", "HID", "Incidents", "RewardSpend"])
+    w.writerow(["Module", "Metric", "Value"])
+    w.writerow(["Report", "Period", "%s %d" % (D.month_name(mo), yr)])
+    w.writerow(["Report", "Quarter (auto from month)", D.quarter_label(q)])
+    w.writerow(["Safety Observations", "Total", len(rep["obs"])])
+    for k, v in Counter(o["status"] for o in rep["obs"]).items():
+        w.writerow(["Safety Observations", "Status: %s" % k, v])
+    w.writerow(["HID Hazards", "Total", len(rep["haz"])])
+    w.writerow(["Near Miss", "Total", len(rep["nm"])])
+    w.writerow(["Incidents", "Total", len(rep["inc"])])
+    w.writerow(["Incidents", "Non-LTI", len(rep["inc"]) - len(rep["lti"])])
+    w.writerow(["LTI", "Total", len(rep["lti"])])
+    w.writerow(["Corrective Actions", "Opened", len(rep["ca_opened"])])
+    w.writerow(["Corrective Actions", "Closed", len(rep["ca_closed"])])
+    w.writerow(["Corrective Actions", "Open now", len(rep["ca_open_now"])])
+    w.writerow(["Corrective Actions", "Overdue", len(rep["ca_overdue"])])
+    w.writerow(["Rewards", "Requests", len(rep["rq"])])
+    for k, v in Counter(r["status"] for r in rep["rq"]).items():
+        w.writerow(["Rewards", "Status: %s" % k, v])
+    w.writerow(["Rewards", "Spend", rep["reward_spend"]])
+    w.writerow(["Budget", "Monthly used", D.budget_used(yr, month=mo)])
+    w.writerow(["Budget", "Quarter used", D.budget_used(yr, quarter=q)])
 
-    def counts(month=None, quarter=None):
-        res = {}
-        for coll in ("safety_observations", "near_miss_hazard_reports", "incidents"):
-            n = 0
-            for it in D.DB[coll]:
-                d = D.parse_dt(it["ts"]).date()
-                if d.year != yr:
-                    continue
-                if month and d.month != month:
-                    continue
-                if quarter and D.quarter_of_month(d.month) != quarter:
-                    continue
-                n += 1
-            res[coll] = n
-        return res
+    w.writerow([])
+    w.writerow(["Department (Adinkra)", "Operational unit", "Points", "ActiveEmployees", "MonthlyLimit", "Used", "Remaining"])
+    for d in rep["departments"]:
+        w.writerow([d["adinkra_name"], d.get("department", ""), d["points"],
+                    d["active_employees"], d["limit"], d["used"], d["remaining"]])
 
-    mc = counts(month=mo)
-    w.writerow(["Monthly", "%s %d" % (D.month_name(mo), yr), mc["safety_observations"],
-                mc["near_miss_hazard_reports"], mc["incidents"], D.budget_used(yr, month=mo)])
-    qc = counts(quarter=q)
-    w.writerow(["Quarterly", "%s %d" % (D.quarter_label(q), yr), qc["safety_observations"],
-                qc["near_miss_hazard_reports"], qc["incidents"], D.budget_used(yr, quarter=q)])
-    return "report_%d_%02d.csv" % (yr, mo), out.getvalue()
+    w.writerow([])
+    w.writerow(["Contractor", "Members", "Points", "RewardSpend"])
+    for c in rep["contractors"]:
+        w.writerow([c["name"], c["members"], c["points"], rep["comp_spend"].get(c["company_id"], 0)])
+    return "monthly_report_%d_%02d.csv" % (yr, mo), out.getvalue()
 
 
 # --------------------------------------------------------------------------
@@ -907,7 +1088,7 @@ GET_ROUTES = {
     "/points": ("Points Ledger", body_points),
     "/rewards": ("Reward Catalogue", body_rewards),
     "/rewards/approvals": ("Reward Approvals", body_reward_approvals),
-    "/rewards/releases": ("Finance Releases", body_reward_releases),
+    "/rewards/releases": ("Finance Approvals", body_reward_finance),
     "/leaderboard": ("Leaderboards", body_leaderboard),
     "/weekly": ("Weekly Rewards", body_weekly),
     "/adinkra": ("Adinkra Identity", body_adinkra),
@@ -924,7 +1105,7 @@ POST_ROUTES = {
     "/actions": post_actions,
     "/rewards": post_reward_request,
     "/rewards/approvals": post_reward_approval,
-    "/rewards/releases": post_reward_release,
+    "/rewards/releases": post_reward_finance,
     "/budgets": post_budgets,
     "/admin": post_admin,
 }

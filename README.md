@@ -19,11 +19,11 @@ Server-rendered HTML/CSS with a JSON file store.
 python app.py
 ```
 
-Then open <http://localhost:8000>. That's it — no install step.
+Then open <http://localhost:8090>. That's it — no install step.
 
 | Environment variable | Effect |
 |---|---|
-| `PORT` | Port to serve on (default `8000`). |
+| `PORT` | Port to serve on (default `8090`). |
 | `NO_BROWSER` | Set to any value to stop the browser auto-opening. |
 
 On first run a demo dataset is seeded into `data/safetypays_data.json`. Delete that
@@ -39,8 +39,8 @@ Pick any demo user on the sign-in screen — each carries a role:
 - **Supervisor** — review & approve reports, raise/close corrective actions
 - **HSE Manager** — review queue, reports centre, budget view
 - **Management** — reports centre, budget view
-- **Finance Manager** — release approved rewards, budget view
-- **Admin** — approve rewards, **edit budgets**, manage department employee counts
+- **Finance Manager** — approve & release rewards (steps 3–4), budget view
+- **Admin** — approve rewards (step 2), **edit budgets**, manage department employee counts
 - **Contractor Admin** — contractor-side access
 
 ### Budget access control
@@ -75,6 +75,45 @@ This is enforced both in the navigation and on every budget route.
 
 ---
 
+## Reward approval workflow
+
+Workers request rewards using their **rewardable points** (spendable balance =
+points earned − points already released). Each request runs a four-stage flow:
+
+```text
+Employee submits reward request
+        ↓
+Admin approves            (step 2)
+        ↓
+Finance Manager approves  (step 3)
+        ↓
+Reward is released        (step 4)
+```
+
+Tracked at every stage: request status, admin approval, finance approval,
+**rejection reason** (captured at the admin or finance stage), and reward-release
+tracking (who released it and when). Either approver can reject with a reason; a
+released reward's cash value is charged to the department, monthly, quarterly and
+yearly budgets.
+
+## Monthly Reports Centre
+
+`/reports` auto-generates a report for **every module** for the selected month
+(the quarter is derived automatically). On-screen sections plus a full CSV export:
+
+- Safety Observations (totals, status, by category)
+- HID — Hazard reports (by severity)
+- Near Misses (by severity)
+- Incidents (by severity, LTI split)
+- LTI (each Lost Time Injury and its point reset)
+- Corrective Actions (opened / closed / open / overdue)
+- Rewards (requests by workflow status, spend)
+- Budget (monthly + auto-quarter usage)
+- Departments (the Adinkra League snapshot)
+- Contractors (points, members, reward spend)
+
+---
+
 ## Modules
 
 - Role-based dashboards
@@ -85,11 +124,11 @@ This is enforced both in the navigation and on every budget route.
 - Corrective action tracker (create, close, overdue flags)
 - Safety points ledger
 - Reward catalogue + worker request flow
-- Admin reward approval → Finance release (two-stage)
+- Reward approval workflow: submit → Admin → Finance → release, with rejection reasons
 - Individual, contractor and department leaderboards (weekly/monthly/quarterly/yearly)
 - Weekly Rewards (week-in-month)
 - Adinkra Safety Identity & Adinkra League
-- Monthly & quarterly report centre
+- Monthly Reports Centre — auto-generated reports for every module
 - Yearly, monthly and quarterly reward budget controls
 - Department employee-based reward limits
 - CSV exports that respect the active filters
@@ -98,22 +137,23 @@ This is enforced both in the navigation and on every budget route.
 
 ## Adinkra identity (no "Safety Team" labels)
 
-Departments are represented **only** by real Adinkra symbols, names, meanings and
-mottos. Every symbol is a genuine file hosted on **Wikimedia Commons**, referenced
-through the stable `Special:FilePath` endpoint, so the app always shows authentic
-artwork while keeping source attribution clear (each card links to its Commons file
-page).
+Departments use **only** Adinkra names and symbols — there are no generic "Safety
+Team" labels. Each Adinkra is the **emblem of a real operational department**, and
+wherever a symbol or name appears in the app its department is attached to it.
+Every symbol is a genuine file hosted on **Wikimedia Commons**, referenced through
+the stable `Special:FilePath` endpoint, so the app always shows authentic artwork
+while keeping source attribution clear (each card links to its Commons file page).
 
-| Department | Meaning | Theme |
+| Adinkra | Department | Meaning |
 |---|---|---|
-| **Akoben** | War horn — vigilance, a call to action | Alertness |
-| **Eban** | Fence — safety and security | Protection |
-| **Fihankra** | Compound house — safety & solidarity | Site safety |
-| **Sankofa** | Return and fetch it | Learning from incidents |
-| **Nkonsonkonson** | Chain links — we are linked | Teamwork |
-| **Dwennimmen** | Ram's horns — strength with humility | Resilience |
-| **Nyansapo** | Wisdom knot | Problem solving |
-| **Adinkrahene** | Chief of symbols — leadership | Leadership |
+| **Akoben** | HSE & Emergency Response | War horn — vigilance, a call to action |
+| **Eban** | Security | Fence — safety and security |
+| **Fihankra** | Site Services & Facilities | Compound house — safety & solidarity |
+| **Sankofa** | Training & Competency | Return and fetch it — learn from incidents |
+| **Nkonsonkonson** | Logistics & Haulage | Chain links — we are linked |
+| **Dwennimmen** | Maintenance & Engineering | Ram's horns — strength with humility |
+| **Nyansapo** | Processing & Metallurgy | Wisdom knot — ingenuity |
+| **Adinkrahene** | Mining Operations | Chief of symbols — leadership |
 
 Brand mark: **Akoma Ntoaso** (linked hearts — understanding & agreement). All
 symbol files were verified to resolve from Commons.

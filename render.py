@@ -42,13 +42,87 @@ def badge(text, kind="muted"):
 STATUS_BADGE = {
     "submitted": "warn", "approved": "ok", "rejected": "bad",
     "open": "warn", "closed": "ok", "under_review": "warn",
-    "pending_admin": "warn", "released": "ok",
+    "pending_admin": "warn", "pending_finance": "warn",
+    "finance_approved": "ok", "released": "ok",
+}
+
+STATUS_LABEL = {
+    "pending_admin": "Pending Admin",
+    "pending_finance": "Pending Finance",
+    "finance_approved": "Finance Approved",
+    "released": "Released",
+    "rejected": "Rejected",
 }
 
 
 def status_badge(status):
-    label = status.replace("_", " ").title()
+    label = STATUS_LABEL.get(status, status.replace("_", " ").title())
     return badge(label, STATUS_BADGE.get(status, "muted"))
+
+
+# -- Department / Adinkra helpers: whenever an Adinkra appears, attach the dept --
+
+
+def dept_label(dept_key):
+    """Plain text: 'Akoben · HSE & Emergency Response'."""
+    dep = D.dept_department(dept_key)
+    return "%s · %s" % (D.dept_name(dept_key), dep) if dep else D.dept_name(dept_key)
+
+
+def dept_label_html(dept_key):
+    """Two-line cell: Adinkra name with its operational department beneath."""
+    return '<strong>%s</strong><div class="kpi-mini">%s</div>' % (
+        esc(D.dept_name(dept_key)), esc(D.dept_department(dept_key)))
+
+
+def dept_symbol_cell(dept_key, size=40, extra=""):
+    """Symbol + Adinkra name + attached department, used in league/leaderboards."""
+    d = D.department(dept_key)
+    if not d:
+        return esc(dept_key)
+    sub = esc(d.get("department", ""))
+    if extra:
+        sub += " · " + esc(extra)
+    return ('<div class="symbol-cell">%s<div><strong>%s</strong>'
+            '<div class="kpi-mini">%s</div></div></div>'
+            % (symbol_img(d["commons_file"], size), esc(d["adinkra_name"]), sub))
+
+
+# -- Reward approval workflow --
+REWARD_FLOW = [
+    ("pending_admin", "Employee submits"),
+    ("pending_finance", "Admin approves"),
+    ("finance_approved", "Finance approves"),
+    ("released", "Reward released"),
+]
+
+
+def reward_flow_diagram(active=None):
+    """Static 4-stage workflow diagram for the reward approval process."""
+    order = {s: i for i, (s, _) in enumerate(REWARD_FLOW)}
+    here = order.get(active, -1)
+    cells = []
+    for i, (status, label) in enumerate(REWARD_FLOW):
+        state = "done" if i < here else ("now" if i == here else "todo")
+        cells.append('<div class="flow-step %s"><span class="flow-dot">%d</span>%s</div>'
+                     % (state, i + 1, esc(label)))
+    return '<div class="flow">%s</div>' % '<span class="flow-arrow">&rarr;</span>'.join(cells)
+
+
+def reward_trail(r):
+    """Compact per-request progress trail with timestamps + rejection reason."""
+    parts = []
+    if r.get("admin_ts"):
+        parts.append('<span class="trail ok">Admin &check; %s</span>' % esc(D.fmt_date(r["admin_ts"])))
+    if r.get("finance_ts"):
+        parts.append('<span class="trail ok">Finance &check; %s</span>' % esc(D.fmt_date(r["finance_ts"])))
+    if r.get("released_ts"):
+        parts.append('<span class="trail ok">Released %s</span>' % esc(D.fmt_date(r["released_ts"])))
+    if r.get("status") == "rejected":
+        who = "Admin" if r.get("reject_stage") == "admin" else "Finance"
+        parts.append('<span class="trail bad">Rejected by %s: %s</span>'
+                     % (who, esc(r.get("reject_reason") or "no reason given")))
+    return '<div class="trail-row">%s</div>' % "".join(parts) if parts else ""
 
 
 def table(headers, rows, empty="No records."):
@@ -101,7 +175,7 @@ def nav_for(user):
     if role in D.REWARD_APPROVE_ROLES:
         rewards.append(("/rewards/approvals", "Reward Approvals"))
     if role in D.REWARD_RELEASE_ROLES:
-        rewards.append(("/rewards/releases", "Finance Releases"))
+        rewards.append(("/rewards/releases", "Finance Approvals"))
     groups.append(("Rewards", rewards))
 
     league = [("/leaderboard", "Leaderboards"),
@@ -335,6 +409,18 @@ textarea{min-height:84px;resize:vertical}
 .hint{color:var(--muted);font-size:12.5px}
 .kpi-mini{font-size:12px;color:var(--muted)}
 .symbol-cell{display:flex;align-items:center;gap:10px}
+.flow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:18px;box-shadow:var(--shadow)}
+.flow-step{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.flow-step .flow-dot{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:#ece8df;color:#5d564a;font-size:12px;font-weight:700}
+.flow-step.done{color:var(--ink)}
+.flow-step.done .flow-dot{background:var(--green);color:#fff}
+.flow-step.now{color:var(--navy);font-weight:600}
+.flow-step.now .flow-dot{background:var(--gold);color:#2a2305}
+.flow-arrow{color:var(--muted)}
+.trail-row{display:flex;gap:6px;flex-wrap:wrap}
+.trail{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:12px;background:#ece8df;color:#5d564a}
+.trail.ok{background:#dff3e6;color:#176c3c}
+.trail.bad{background:#fadbd6;color:#962014}
 """
 
 JS = """

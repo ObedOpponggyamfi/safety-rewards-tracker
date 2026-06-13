@@ -34,11 +34,14 @@ def file_page_url(commons_file):
 
 
 # Each entry is a real Adinkra symbol with a verified Wikimedia Commons file.
-# key -> name, meaning, motto, commons_file
+# Every Adinkra is the emblem of a real operational ``department`` -- so whenever
+# a symbol is shown in the UI, its department is always attached to it.
+# key -> name, meaning, motto, commons_file, department
 DEPARTMENTS = [
     {
         "key": "akoben",
         "adinkra_name": "Akoben",
+        "department": "HSE & Emergency Response",
         "meaning": "War horn — vigilance, alertness and a call to action",
         "motto": "We sound the alarm before harm.",
         "commons_file": "Akoben adinkra.png",
@@ -47,6 +50,7 @@ DEPARTMENTS = [
     {
         "key": "eban",
         "adinkra_name": "Eban",
+        "department": "Security",
         "meaning": "Fence — safety, security and the protection of the home",
         "motto": "We fence out every hazard.",
         "commons_file": "Eban (Adinkra).png",
@@ -55,6 +59,7 @@ DEPARTMENTS = [
     {
         "key": "fihankra",
         "adinkra_name": "Fihankra",
+        "department": "Site Services & Facilities",
         "meaning": "Compound house — safety, solidarity and brotherhood",
         "motto": "One compound, zero harm.",
         "commons_file": "Fihankra.png",
@@ -63,6 +68,7 @@ DEPARTMENTS = [
     {
         "key": "sankofa",
         "adinkra_name": "Sankofa",
+        "department": "Training & Competency",
         "meaning": "Return and fetch it — learn from the past to protect the future",
         "motto": "We learn from every incident.",
         "commons_file": "Sankofa bird symbol.svg",
@@ -71,6 +77,7 @@ DEPARTMENTS = [
     {
         "key": "nkonsonkonson",
         "adinkra_name": "Nkonsonkonson",
+        "department": "Logistics & Haulage",
         "meaning": "Chain links — unity and human relations; we are linked together",
         "motto": "Linked together, safe together.",
         "commons_file": "Nkonsonkonson.png",
@@ -79,6 +86,7 @@ DEPARTMENTS = [
     {
         "key": "dwennimmen",
         "adinkra_name": "Dwennimmen",
+        "department": "Maintenance & Engineering",
         "meaning": "Ram's horns — strength tempered with humility",
         "motto": "Strong at work, humble in safety.",
         "commons_file": "Dwennimmen.svg",
@@ -87,6 +95,7 @@ DEPARTMENTS = [
     {
         "key": "nyansapo",
         "adinkra_name": "Nyansapo",
+        "department": "Processing & Metallurgy",
         "meaning": "Wisdom knot — wisdom, ingenuity and patience",
         "motto": "Wise hands prevent harm.",
         "commons_file": "Nyansapo.svg",
@@ -95,6 +104,7 @@ DEPARTMENTS = [
     {
         "key": "adinkrahene",
         "adinkra_name": "Adinkrahene",
+        "department": "Mining Operations",
         "meaning": "Chief of the Adinkra symbols — leadership, authority and charisma",
         "motto": "Leading safety from the front.",
         "commons_file": "Adinkrahene.svg",

@@ -224,6 +224,7 @@ def seed():
             "id": idx,
             "key": dept["key"],
             "adinkra_name": dept["adinkra_name"],
+            "department": dept["department"],
             "meaning": dept["meaning"],
             "motto": dept["motto"],
             "commons_file": dept["commons_file"],
@@ -403,25 +404,47 @@ def seed():
     })
     _apply_lti_reset(db, lti_dept, lti_ts, inc_id, lti_worker["id"])
 
-    # ---- Reward requests in various states --------------------------------
-    sample_workers = rng.sample(workers, 8)
-    states = ["pending_admin", "pending_admin", "approved", "approved", "released", "released", "rejected", "pending_admin"]
+    # ---- Reward requests across the 4-stage workflow ----------------------
+    # submit -> admin approves -> finance approves -> released  (or rejected)
+    sample_workers = rng.sample(workers, 9)
+    states = ["pending_admin", "pending_admin", "pending_finance", "pending_finance",
+              "finance_approved", "released", "released", "rejected", "pending_admin"]
+    admin_uid = next(u["id"] for u in db["users"] if u["role"] == "admin")
+    finance_uid = next(u["id"] for u in db["users"] if u["role"] == "finance_manager")
     rqid = 1
     for w, st in zip(sample_workers, states):
         reward = rng.choice(db["rewards"])
         d = anchor - timedelta(days=rng.randint(0, 18))
-        ts = datetime(d.year, d.month, d.day, 10, 0).isoformat(timespec="seconds")
+        base = datetime(d.year, d.month, d.day, 10, 0)
+        ts = base.isoformat(timespec="seconds")
+        admin_ts = base + timedelta(days=1)
+        fin_ts = base + timedelta(days=2)
+        rel_ts = base + timedelta(days=3)
         rq = {
             "id": rqid, "ts": ts, "user_id": w["id"], "dept_key": w["dept_key"],
             "reward_id": reward["id"], "point_cost": reward["point_cost"],
             "cash_value": reward["cash_value"], "status": st,
-            "admin_id": None, "finance_id": None, "decided_ts": None,
+            "admin_id": None, "admin_ts": None, "finance_id": None, "finance_ts": None,
+            "released_by": None, "released_ts": None,
+            "reject_reason": None, "rejected_by": None, "reject_stage": None, "rejected_ts": None,
         }
-        if st in ("approved", "released", "rejected"):
-            rq["admin_id"] = 4
-            rq["decided_ts"] = ts
+        # admin approval recorded for everything past pending_admin (incl. rejected at finance)
+        if st in ("pending_finance", "finance_approved", "released"):
+            rq["admin_id"] = admin_uid
+            rq["admin_ts"] = admin_ts.isoformat(timespec="seconds")
+        if st in ("finance_approved", "released"):
+            rq["finance_id"] = finance_uid
+            rq["finance_ts"] = fin_ts.isoformat(timespec="seconds")
         if st == "released":
-            rq["finance_id"] = 3
+            rq["released_by"] = finance_uid
+            rq["released_ts"] = rel_ts.isoformat(timespec="seconds")
+        if st == "rejected":
+            rq["admin_id"] = admin_uid
+            rq["admin_ts"] = admin_ts.isoformat(timespec="seconds")
+            rq["rejected_by"] = admin_uid
+            rq["reject_stage"] = "admin"
+            rq["reject_reason"] = "Insufficient supporting evidence for the request."
+            rq["rejected_ts"] = admin_ts.isoformat(timespec="seconds")
         db["reward_requests"].append(rq)
         rqid += 1
 
@@ -483,6 +506,35 @@ def company(cid):
 def dept_name(key):
     d = department(key)
     return d["adinkra_name"] if d else key
+
+
+def dept_department(key):
+    """The real operational department a given Adinkra emblem represents."""
+    d = department(key)
+    return d.get("department", "") if d else ""
+
+
+def records_in(coll, year, month=None, quarter=None, where=None):
+    """All records in a collection within a period, with an optional predicate.
+
+    Used by the Monthly Reports Centre to auto-generate per-module reports.
+    """
+    out = []
+    for it in DB.get(coll, []):
+        ts = it.get("ts")
+        if not ts:
+            continue
+        d = parse_dt(ts).date()
+        if d.year != year:
+            continue
+        if month is not None and d.month != month:
+            continue
+        if quarter is not None and quarter_of_month(d.month) != quarter:
+            continue
+        if where is not None and not where(it):
+            continue
+        out.append(it)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -647,7 +699,8 @@ def department_leaderboard(year=None, month=None, quarter=None):
         limit = dept_monthly_limit(d)
         used = dept_budget_used(d["key"], year or today().year, month or today().month)
         rows.append({
-            "dept_key": d["key"], "adinkra_name": d["adinkra_name"], "meaning": d["meaning"],
+            "dept_key": d["key"], "adinkra_name": d["adinkra_name"],
+            "department": d.get("department", ""), "meaning": d["meaning"],
             "motto": d["motto"], "commons_file": d["commons_file"],
             "points": pts, "active_employees": d["active_employees"],
             "employee_count": d["employee_count"], "limit": limit, "used": used,

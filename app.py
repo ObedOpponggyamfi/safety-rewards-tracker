@@ -110,6 +110,34 @@ def body_dashboard(user, qs):
                 R.section("Actual consequences", R.bar_chart(ordered(actual_dist, D.CONSEQUENCES))),
                 R.section("Potential consequences", R.bar_chart(ordered(potential_dist, D.CONSEQUENCES)))))
 
+    # AI Safety Prediction band (compact; full detail on /ai)
+    ai = D.ai_predict(free=True)
+    if ai["ok"]:
+        first = lambda l: l[0] if l else None
+
+        def mini(title, pred):
+            if not pred:
+                return R.stat_card(title, "—", "insufficient data")
+            return R.stat_card(title, "%s · %d" % (pred["risk_level"], pred["risk_score"]), pred["entity_name"])
+
+        od = ai["overdue_actions"]
+        n_hp = len(D.high_potential_events(free=True))
+        ai_cards = ('<div class="grid cols-4">%s%s%s%s</div><div style="height:14px"></div>'
+                    '<div class="grid cols-4">%s%s%s%s</div><div style="height:14px"></div>'
+                    '<div class="grid cols-2">%s%s</div>' % (
+                        mini("Highest Risk Location", first(ai["locations"])),
+                        mini("Highest Risk Department", first(ai["departments"])),
+                        mini("Highest Risk Activity", first(ai["activities"])),
+                        mini("Equipment Requiring Attention", first(ai["equipment"])),
+                        mini("Contractor Risk Alert", first(ai["contractors"])),
+                        R.stat_card("Corrective Action Overdue Risk", "%d flagged" % len(od), "overdue / due within 7 days"),
+                        mini("Repeat Hazard Alert", first(ai["repeat_hazards"])),
+                        R.stat_card("High-Potential Event Alert", "%d events" % n_hp, ai["period_label"]),
+                        mini("Predicted Risk — %s" % ai["period_label"], ai["overall"]),
+                        R.stat_card("Recommended Immediate Action", ai["top"]["risk_level"], ai["top"]["recommended_action"])))
+        top += R.section("AI Safety Prediction · %s" % ai["period_label"],
+                         ai_cards + '<div class="pill-row" style="margin-top:12px"><a class="btn gold" href="/ai">Open AI Safety Insights &rarr;</a></div>')
+
     # Personal panel for workers / contractors.
     personal = ""
     if user["role"] == "worker":
@@ -1120,8 +1148,141 @@ def body_pro(user, qs):
     cta = ('<div class="card" style="text-align:center"><h3 style="margin:0 0 6px">Upgrade Safety Pays</h3>'
            '<p class="hint">Unlock AI analytics, unlimited history, investigation workflows, frequency rates, '
            'maps and enterprise controls.</p><a class="btn gold" href="/pro">Talk to us about Pro</a></div>')
-    intro = '<p class="hint">You are on the <strong>%s</strong> plan. Existing data is never deleted when a limit is reached.</p>' % D.PLAN
+    intro = ('<p class="hint">You are on the <strong>%s</strong> plan. Existing data is never deleted when a limit is reached. '
+             '<span class="included-badge">%s</span> &middot; <strong>%s</strong>.</p>'
+             % (D.PLAN, R.esc(D.AI_FREE_LABEL), R.esc(D.AI_PRO_LABEL)))
     return intro + cta + limits + locked
+
+
+def body_ai(user, qs):
+    period = q1(qs, "period", "month")
+    yr = qint(qs, "year", D.today().year)
+    mo = qint(qs, "month", D.today().month)
+    week = qint(qs, "week")
+    dept = q1(qs, "dept") or None
+    loc = q1(qs, "location") or None
+    contractor = q1(qs, "contractor") or None
+    equipment = q1(qs, "equipment") or None
+    activity = q1(qs, "activity") or None
+    res = D.ai_predict(year=yr, month=mo, period=period, week=week, dept=dept, location=loc,
+                       contractor=contractor, equipment=equipment, activity=activity, free=True)
+
+    qsd = {"period": period, "year": yr, "month": mo, "week": week or "", "dept": dept or "",
+           "location": loc or "", "contractor": contractor or "", "equipment": equipment or "", "activity": activity or ""}
+    intro = ('<p class="hint"><span class="included-badge">%s</span> Predictions are generated from approved '
+             'safety records using transparent, rule-based scoring.</p>' % R.esc(D.AI_FREE_LABEL))
+    pills = '<div class="pill-row">%s%s</div>' % (
+        '<a class="%s" href="?%s">Weekly</a>' % ("active" if period == "week" else "", urlencode(dict(qsd, period="week"))),
+        '<a class="%s" href="?%s">Monthly</a>' % ("active" if period == "month" else "", urlencode(dict(qsd, period="month"))))
+    controls = """<form class="filter-bar" method="get">
+      <input type="hidden" name="period" value="%s">
+      <div class="field"><label>Month</label>%s</div>
+      <div class="field"><label>Year</label><input name="year" value="%d" style="width:80px"></div>
+      <div class="field"><label>Week</label><select name="week">%s</select></div>
+      <div class="field"><label>Department</label><select name="dept">%s</select></div>
+      <div class="field"><label>Location</label><select name="location">%s</select></div>
+      <div class="field"><label>Contractor</label><select name="contractor">%s</select></div>
+      <div class="field"><label>Equipment</label><select name="equipment">%s</select></div>
+      <div class="field"><label>Activity</label><select name="activity">%s</select></div>
+      <button class="btn">Apply</button>
+      <a class="btn ghost" href="/ai.csv?%s">Export CSV</a>
+    </form>""" % (period, R.month_select("month", mo, onchange=False), yr,
+                  _opts([(w, "Week %d" % w) for w in range(1, 6)], week, "Auto"),
+                  _dept_opts(dept), _opts([(l, l) for l in D.location_options()], loc, "All locations"),
+                  _opts([(c["id"], c["name"]) for c in D.DB["companies"]], contractor, "All contractors"),
+                  _opts([(e, e) for e in D.EQUIPMENT], equipment, "All equipment"),
+                  _opts([(a, a) for a in D.ACTIVITIES], activity, "All activities"), urlencode(qsd))
+    disclaimer = R.ai_disclaimer()
+
+    if not res["ok"]:
+        msg = ('<div class="empty">%s<div class="hint" style="margin-top:8px">Currently %d approved record(s) in range — '
+               'at least %d are required, with 30+ days of activity and 3+ records per entity.</div></div>'
+               % (R.esc(res["message"]), res["have"], res["need"]))
+        return intro + pills + controls + disclaimer + msg
+
+    overall, top, pl = res["overall"], res["top"], res["period_label"]
+
+    def syn(name, score, factors, rec, conf="Medium"):
+        score = min(100, score)
+        return {"entity_name": name, "risk_score": score, "risk_level": D.ai_risk_level(score),
+                "contributing_factors": factors, "recommended_action": rec,
+                "prediction_period": pl, "confidence_label": conf}
+
+    od = res["overdue_actions"]
+    n_over = sum(1 for a in od if a["risk"] == "Overdue")
+    n_at = len(od) - n_over
+    overdue_pred = syn("Corrective Action Overdue Risk", n_over * 15 + n_at * 8,
+                       "%d corrective action(s) overdue and %d due within 7 days." % (n_over, n_at),
+                       "Close overdue corrective actions and re-baseline upcoming due dates.")
+    hp = D.high_potential_events(year=yr, month=(None if period == "week" else mo), dept=dept, location=loc, free=True)
+    hipo_pred = syn("High-Potential Event Alert", len(hp) * 10,
+                    "%d high-potential event(s) recorded in %s." % (len(hp), pl),
+                    "Escalate and investigate high-potential events; verify critical controls.", "High")
+    rec_pred = {"entity_name": top["entity_name"], "risk_score": top["risk_score"], "risk_level": top["risk_level"],
+                "contributing_factors": top["contributing_factors"], "recommended_action": top["recommended_action"],
+                "prediction_period": pl, "confidence_label": top["confidence_label"]}
+
+    first = lambda lst: lst[0] if lst else None
+
+    def card(title, pred):
+        if not pred:
+            return ('<div class="card"><div class="ai-head"><h3>%s</h3>%s</div>'
+                    '<div class="hint" style="margin-top:8px">Not enough data for this prediction yet.</div></div>'
+                    % (R.esc(title), R.badge("No data", "muted")))
+        return R.ai_pred_card(pred, title=title)
+
+    key_cards = '<div class="grid cols-2">%s</div>' % "".join([
+        card("Highest Risk Location", first(res["locations"])),
+        card("Highest Risk Department", first(res["departments"])),
+        card("Highest Risk Activity", first(res["activities"])),
+        card("Equipment Requiring Attention", first(res["equipment"])),
+        card("Contractor Risk Alert", first(res["contractors"])),
+        card("Corrective Action Overdue Risk", overdue_pred),
+        card("Repeat Hazard Alert", first(res["repeat_hazards"])),
+        card("High-Potential Event Alert", hipo_pred),
+        card("Predicted Risk — %s" % pl, overall),
+        card("Recommended Immediate Action", rec_pred)])
+    key = R.section("AI prediction cards · %s" % pl, key_cards)
+
+    def ptable(preds, label, cap):
+        rows = [["#%d" % i, R.esc(p["entity_name"]), "<strong>%d</strong>" % p["risk_score"],
+                 R.ai_level_badge(p["risk_level"]), R.esc(p["recommended_action"])]
+                for i, p in enumerate(preds[:cap], 1)]
+        return R.table(["#", label, "Score", "Risk", "Recommended action"], rows, "Not enough data for a prediction.")
+
+    locs_tbl = R.section("Top predicted risk locations", ptable(res["locations"], "Location", D.FREE_LIMITS["locations"]))
+    acts_tbl = R.section("Top risky activities", ptable(res["activities"], "Activity", 5))
+    equip_tbl = R.section("Equipment requiring attention", ptable(res["equipment"], "Equipment", 5))
+    dept_inc = [p for p in res["departments"] if p["stats"]["trend"]] or res["departments"]
+    dept_tbl = R.section("Departments with increasing risk", ptable(dept_inc, "Department", D.FREE_LIMITS["departments"]))
+
+    rep_rows = [[R.esc(p["entity_name"]), "<strong>%d</strong>" % p["risk_score"], R.ai_level_badge(p["risk_level"]),
+                 R.esc(p["contributing_factors"])] for p in res["repeat_hazards"]]
+    rep_tbl = R.section("Repeat hazards", R.table(["Entity", "Score", "Risk", "Why"], rep_rows, "No repeat hazards detected."))
+
+    od_rows = [[D.fmt_date(a["due"]), R.dept_label_html(a["dept_key"]), R.esc(a.get("location", "")),
+                R.esc(a["description"]), R.badge(a["risk"], "bad" if a["risk"] == "Overdue" else "hot")] for a in od[:15]]
+    od_tbl = R.section("Corrective actions likely to lapse",
+                       R.table(["Due", "Department", "Location", "Action", "Risk"], od_rows, "No overdue or at-risk actions."))
+
+    recs = []
+    for p in [overall] + res["locations"][:3] + res["equipment"][:3] + res["activities"][:3] + res["contractors"][:2] + [overdue_pred, hipo_pred]:
+        if p and p["recommended_action"] not in recs:
+            recs.append(p["recommended_action"])
+    interventions = R.section("Recommended interventions",
+        '<div class="card"><ul style="margin:0;padding-left:18px;line-height:1.9">%s</ul></div>'
+        % "".join("<li>%s</li>" % R.esc(x) for x in recs[:10]))
+
+    expl = [overall["contributing_factors"]] + [p["contributing_factors"] for p in res["locations"][:3]]
+    panel = R.section("Prediction explanation panel",
+        '<div class="card"><ul style="margin:0;padding-left:18px;line-height:1.7">%s</ul></div>'
+        % "".join("<li>%s</li>" % R.esc(x) for x in expl))
+
+    pro = R.section(D.AI_PRO_LABEL, '<div class="grid cols-3">%s</div>'
+                    % "".join(R.pro_card(f) for f in D.AI_PRO_FEATURES))
+
+    return (intro + pills + controls + disclaimer + key + locs_tbl + acts_tbl + equip_tbl
+            + dept_tbl + rep_tbl + od_tbl + interventions + panel + pro)
 
 
 def post_damage(user, form):
@@ -1584,6 +1745,26 @@ def csv_summary(user, qs):
     return "summary.csv", out.getvalue()
 
 
+def csv_ai(user, qs):
+    res = D.ai_predict(year=qint(qs, "year", D.today().year), month=qint(qs, "month", D.today().month),
+                       period=q1(qs, "period", "month"), week=qint(qs, "week"),
+                       dept=q1(qs, "dept") or None, location=q1(qs, "location") or None,
+                       contractor=q1(qs, "contractor") or None, equipment=q1(qs, "equipment") or None,
+                       activity=q1(qs, "activity") or None, free=True)
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["EntityType", "Entity", "RiskScore", "RiskLevel", "Confidence", "Recommended", "Period", "Factors"])
+    if not res["ok"]:
+        w.writerow(["info", res["message"], "", "", "", "", res["period_label"], ""])
+        return "ai_predictions.csv", out.getvalue()
+    rows = ([res["overall"]] + res["locations"] + res["departments"] + res["equipment"]
+            + res["activities"] + res["contractors"] + res["causes"])
+    for p in rows:
+        w.writerow([p["entity_type"], p["entity_name"], p["risk_score"], p["risk_level"],
+                    p["confidence_label"], p["recommended_action"], p["prediction_period"], p["contributing_factors"]])
+    return "ai_predictions.csv", out.getvalue()
+
+
 # --------------------------------------------------------------------------
 # Routing tables
 # --------------------------------------------------------------------------
@@ -1611,6 +1792,7 @@ GET_ROUTES = {
     "/summary": ("Dept & Contractor Summary", body_summary),
     "/quality": ("Data Quality", body_quality),
     "/pro": ("Upgrade to Pro", body_pro),
+    "/ai": ("AI Safety Insights", body_ai),
 }
 POST_ROUTES = {
     "/report/observation": post_observation,
@@ -1632,6 +1814,7 @@ CSV_ROUTES = {
     "/reports.csv": csv_reports,
     "/hotspots.csv": csv_hotspots,
     "/summary.csv": csv_summary,
+    "/ai.csv": csv_ai,
 }
 # Route -> required permission predicate (user -> bool). Absent = any logged-in user.
 ROUTE_GUARDS = {

@@ -172,6 +172,38 @@ def limit_banner(text):
             '<a href="/pro">See Pro &rarr;</a></div>' % esc(text))
 
 
+# -- AI Safety Prediction --
+AI_LEVEL_BADGE = {"Low": "ok", "Moderate": "warn", "High": "hot", "Critical": "bad"}
+
+
+def ai_level_badge(level):
+    return badge(level, AI_LEVEL_BADGE.get(level, "muted"))
+
+
+def confidence_badge(label):
+    return badge("Confidence: %s" % label, {"High": "ok", "Medium": "warn", "Low": "bad"}.get(label, "muted"))
+
+
+def ai_pred_card(pred, title=None):
+    """Explainable AI prediction card — score, level, factors, recommendation."""
+    name = title or pred["entity_name"]
+    score = pred["risk_score"]
+    over = " over" if pred["risk_level"] in ("High", "Critical") else ""
+    bar = '<div class="progress%s"><span style="width:%d%%"></span></div>' % (over, min(100, score))
+    return ('<div class="card ai-card"><div class="ai-head"><h3>%s</h3>%s</div>'
+            '<div class="ai-score"><span class="ai-score-num">%d</span><span class="ai-score-max">/100</span></div>%s'
+            '<div class="ai-factors">%s</div>'
+            '<div class="ai-rec"><strong>Recommended:</strong> %s</div>'
+            '<div class="ai-meta">%s · %s</div></div>'
+            % (esc(name), ai_level_badge(pred["risk_level"]), score, bar,
+               esc(pred["contributing_factors"]), esc(pred["recommended_action"]),
+               esc(pred["prediction_period"]), confidence_badge(pred["confidence_label"])))
+
+
+def ai_disclaimer():
+    return '<div class="ai-disclaimer">%s</div>' % esc(D.AI_DISCLAIMER)
+
+
 def table(headers, rows, empty="No records."):
     if not rows:
         return '<div class="empty">%s</div>' % esc(empty)
@@ -220,6 +252,7 @@ def nav_for(user):
     groups.append(("Workflow", work))
 
     groups.append(("HSE Insights", [
+        ("/ai", "AI Safety Insights"),
         ("/hotspots", "Location Hotspots"),
         ("/highpotential", "High-Potential Events"),
         ("/summary", "Dept & Contractor Summary"),
@@ -512,6 +545,16 @@ textarea{min-height:84px;resize:vertical}
 .pro-badge{display:inline-block;background:var(--gold-soft);color:#6a5410;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px}
 .pro-locked .btn{margin-top:10px}
 .limit-banner{background:#eef3f5;border:1px solid #cfe0e6;color:#1c4456;padding:10px 14px;border-radius:10px;margin-bottom:18px;font-size:13px}
+.ai-card{display:flex;flex-direction:column;gap:8px}
+.ai-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.ai-head h3{margin:0;font-size:15px}
+.ai-score-num{font-size:26px;font-weight:700;color:var(--navy)}
+.ai-score-max{color:var(--muted);font-size:13px}
+.ai-factors{font-size:13px;line-height:1.5}
+.ai-rec{font-size:13px;background:#f4f1ea;border-radius:8px;padding:8px 10px}
+.ai-meta{font-size:12px;color:var(--muted);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ai-disclaimer{font-size:12px;color:var(--muted);background:#fbfaf6;border:1px dashed var(--line);border-radius:10px;padding:10px 14px;margin-bottom:18px}
+.included-badge{display:inline-block;background:#dff3e6;color:#176c3c;font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:20px}
 @media print{
   .sidebar,.topbar,.foot,.btn,button,.filter-bar a,.section-actions,.pro-locked,.limit-banner{display:none!important}
   .layout,main,.content{display:block;padding:0}

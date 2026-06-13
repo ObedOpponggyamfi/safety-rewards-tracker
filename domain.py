@@ -106,7 +106,7 @@ FREE_LIMITS = {
 # Advanced capabilities reserved for paid tiers (rendered as locked cards).
 PRO_FEATURES = [
     "AI Hazard Fingerprint", "AI Duplicate HID Detection", "Geographic hotspot maps",
-    "GPS & QR location capture", "Location risk prediction", "Unlimited location history",
+    "GPS & QR location capture", "Advanced AI Risk Forecasting", "Unlimited location history",
     "Contractor frequency rates", "Man-hours integration", "LTIFR & TRIFR calculations",
     "Detailed root cause analysis", "Investigation workflow", "Cost analytics",
     "Quarterly & yearly reports", "Automated corrective-action escalation",
@@ -147,6 +147,54 @@ REPORT_TYPES = {
     "near_miss": ("Near Misses", "near_miss_hazard_reports"),  # type == Near miss
     "observation": ("Safety Observations", "safety_observations"),
     "damage": ("Property / Equipment Damage", "property_damage"),
+}
+
+# Work activities and named equipment (used for AI prediction grouping).
+ACTIVITIES = [
+    "Loading", "Hauling", "Drilling & Blasting", "Crushing", "Maintenance",
+    "Welding & Hot Work", "Working at Height", "Confined Space Entry",
+    "Electrical Work", "Manual Handling", "Vehicle Operation",
+]
+EQUIPMENT = [
+    "Loader LD-04", "Haul Truck HT-12", "Excavator EX-03", "Conveyor CV-02",
+    "Light Vehicle LV-07", "Generator GEN-02", "Crusher Liner", "Drill Rig DR-05",
+]
+
+# --------------------------------------------------------------------------
+# Basic AI Safety Prediction (rule-based + statistical, fully explainable)
+# --------------------------------------------------------------------------
+AI_MIN_RECORDS = 10   # approved records needed before predicting
+AI_MIN_DAYS = 30      # days of activity needed
+AI_MIN_ENTITY = 3     # records needed for a single entity prediction
+AI_DISCLAIMER = ("AI predictions support HSE decision-making and do not replace professional "
+                 "judgement, inspections, investigations, or legal compliance requirements.")
+AI_FREE_LABEL = "Basic AI Safety Prediction — Included"
+AI_PRO_LABEL = "Advanced AI Risk Forecasting — Pro"
+
+# Advanced capabilities reserved for paid tiers (shown as locked cards on /ai).
+AI_PRO_FEATURES = [
+    "Machine-learning model training on multi-year data", "Custom company-specific models",
+    "Real-time telemetry prediction", "Weather & environmental integration",
+    "Fatigue prediction", "Vehicle collision prediction",
+    "Automated critical-control failure prediction", "Cross-site benchmarking",
+    "Multi-site risk forecasting", "Power BI AI integration", "API access",
+    "Unlimited prediction history", "WhatsApp / SMS / email prediction alerts",
+    "Predictive maintenance integration", "Model accuracy monitoring & retraining",
+    "Custom risk weights",
+]
+
+CAUSE_RECOMMENDATION = {
+    "Procedural": "Review the JSA / procedure",
+    "Behavioural": "Coach the affected team",
+    "Equipment Condition": "Inspect the equipment and verify critical controls",
+    "Training Deficiency": "Deliver targeted training / a toolbox talk",
+    "Inadequate Supervision": "Increase supervision",
+    "Communication Failure": "Reinforce communication protocols",
+    "Coordination Failure": "Review work coordination",
+    "Environmental Condition": "Reassess environmental controls",
+    "Planning Failure": "Review the job plan",
+    "Management System Failure": "Audit the relevant management-system control",
+    "Other": "Conduct a targeted inspection",
 }
 
 # --------------------------------------------------------------------------
@@ -564,6 +612,9 @@ def seed():
         rec["high_potential_reason"] = ("Potential %s consequence." % potential) if rec["is_high_potential"] else ""
         rec["reviewed_by"] = 1 if rec["is_high_potential"] else None
         rec["review_date"] = rec["ts"] if rec["is_high_potential"] else None
+        rec["activity"] = rng.choice(ACTIVITIES)
+        if not rec.get("equipment_involved") and rng.random() < 0.5:
+            rec["equipment_involved"] = rng.choice(EQUIPMENT)
 
     for o in db["safety_observations"]:
         enrich(o)
@@ -579,7 +630,7 @@ def seed():
                     "high_potential_reason": "Lost-time injury with catastrophic potential."})
 
     # ---- Property / equipment damage events -------------------------------
-    equip = ["Haul Truck 12", "Excavator 3", "Conveyor CV02", "Light Vehicle 7", "Generator 2", "Crusher Liner"]
+    equip = EQUIPMENT
     for pd_id in range(1, 9):
         w = rng.choice(workers)
         d = anchor - timedelta(days=rng.randint(0, 60))
@@ -590,6 +641,7 @@ def seed():
             "id": pd_id, "ts": ts, "reporter_id": w["id"], "dept_key": w["dept_key"],
             "location": loc, "sub_location": (rng.choice(sub_locations.get(loc) or [""]) or ""),
             "damage_type": rng.choice(DAMAGE_TYPES), "equipment_involved": rng.choice(equip),
+            "activity": rng.choice(ACTIVITIES),
             "asset_number": "AST-%04d" % rng.randint(1000, 9999),
             "estimated_cost_range": rng.choice(COST_RANGES),
             "downtime_hours": rng.choice([0, 2, 4, 8, 12, 24, 48]),
@@ -1198,3 +1250,274 @@ def data_quality(free=True):
     pct = round(100 * complete / total) if total else 100
     return {"total": total, "missing": missing, "warnings": warnings,
             "awaiting": missing + warnings, "completeness": pct, "samples": samples}
+
+
+# --------------------------------------------------------------------------
+# AI Safety Prediction engine (Free: rule-based + statistical, explainable)
+# --------------------------------------------------------------------------
+
+
+def ai_risk_level(score):
+    if score >= 75:
+        return "Critical"
+    if score >= 50:
+        return "High"
+    if score >= 25:
+        return "Moderate"
+    return "Low"
+
+
+def _activity_span_days():
+    """Days between the earliest and latest safety record (data maturity)."""
+    dates = []
+    for coll in ("incidents", "near_miss_hazard_reports", "safety_observations", "property_damage"):
+        for r in DB.get(coll, []):
+            if r.get("ts"):
+                dates.append(parse_dt(r["ts"]).date())
+    if not dates:
+        return 0
+    return (max(dates) - min(dates)).days
+
+
+def _ai_confidence(n, window_days):
+    return min(95, 35 + 7 * n + (15 if window_days >= AI_MIN_DAYS else 0))
+
+
+def ai_confidence_label(c):
+    return "High" if c >= 75 else ("Medium" if c >= 50 else "Low")
+
+
+def _ai_score(recs, open_a, overdue_a, prev_count):
+    inc = sum(1 for r in recs if r["rtype"] == "incident")
+    hid = sum(1 for r in recs if r["rtype"] == "hid")
+    nm = sum(1 for r in recs if r["rtype"] == "near_miss")
+    dmg = sum(1 for r in recs if r["rtype"] == "damage")
+    hipo = sum(1 for r in recs if r["high_potential"])
+    pot_sev = max([severity_of(r["rec"].get("potential_consequence")) for r in recs] or [0])
+    causes = Counter(r["cause_category"] for r in recs if r["cause_category"])
+    repeat = sum(max(0, c - 1) for c in causes.values())
+    trend = len(recs) > prev_count
+    comp = {
+        "Incidents": 9 * inc, "HIDs": 4 * hid, "Near misses": 3 * nm,
+        "High-potential events": 12 * hipo, "Overdue actions": 7 * overdue_a,
+        "Open actions": 2 * open_a, "Property/equipment damage": 4 * dmg,
+        "Repeat hazards": 6 * repeat, "Potential severity": 5 * pot_sev,
+        "Rising trend": 15 if trend else 0,
+    }
+    score = min(100, sum(comp.values()))
+    stats = {"inc": inc, "hid": hid, "nm": nm, "dmg": dmg, "hipo": hipo, "pot_sev": pot_sev,
+             "repeat": repeat, "open": open_a, "overdue": overdue_a, "trend": trend, "n": len(recs)}
+    return score, comp, stats
+
+
+def _ai_factors(name, level, stats, period_label):
+    parts = []
+    plural = lambda n, w, suff="s": "%d %s%s" % (n, w, suff if n != 1 else "")
+    if stats["inc"]:
+        parts.append(plural(stats["inc"], "incident"))
+    if stats["hid"]:
+        parts.append(plural(stats["hid"], "HID"))
+    if stats["nm"]:
+        parts.append("%d near miss%s" % (stats["nm"], "es" if stats["nm"] != 1 else ""))
+    if stats["hipo"]:
+        parts.append(plural(stats["hipo"], "high-potential event"))
+    if stats["overdue"]:
+        parts.append(plural(stats["overdue"], "overdue corrective action"))
+    if stats["dmg"]:
+        parts.append("%d property/equipment damage case%s" % (stats["dmg"], "s" if stats["dmg"] != 1 else ""))
+    listing = ", ".join(parts) if parts else "limited recent activity"
+    trend = " Activity is trending up versus the previous period." if stats["trend"] else ""
+    return "%s is rated %s because it recorded %s during %s.%s" % (name, level, listing, period_label, trend)
+
+
+def _ai_recommend(entity_type, name, recs, stats):
+    if stats["overdue"]:
+        return "Close the %d overdue corrective action(s) and verify critical controls." % stats["overdue"]
+    if entity_type == "equipment":
+        return "Inspect %s and verify critical controls." % name
+    if entity_type == "activity":
+        return "Review the JSA for %s and deliver a toolbox talk." % name
+    if entity_type == "contractor":
+        return "Review %s's safety performance and increase supervision." % name
+    if entity_type == "cause":
+        return CAUSE_RECOMMENDATION.get(name, "Conduct a targeted inspection") + "."
+    causes = Counter(r["cause_category"] for r in recs if r["cause_category"])
+    if stats["hipo"]:
+        return "Escalate the high-potential event(s) at %s and conduct a targeted inspection." % name
+    if causes:
+        return "%s at %s." % (CAUSE_RECOMMENDATION.get(causes.most_common(1)[0][0], "Conduct a targeted inspection"), name)
+    return "Conduct a targeted inspection at %s and increase supervision." % name
+
+
+def _ai_prediction(entity_type, entity_id, name, recs, open_a, overdue_a, prev_count, period_label, window_days):
+    score, comp, stats = _ai_score(recs, open_a, overdue_a, prev_count)
+    level = ai_risk_level(score)
+    conf = _ai_confidence(stats["n"], window_days)
+    return {
+        "prediction_id": "PRD-%s-%s" % (entity_type[:3].upper(), str(entity_id)),
+        "prediction_type": "%s_risk" % entity_type, "entity_type": entity_type,
+        "entity_id": entity_id, "entity_name": name, "risk_score": score, "risk_level": level,
+        "contributing_factors": _ai_factors(name, level, stats, period_label),
+        "components": comp, "stats": stats,
+        "recommended_action": _ai_recommend(entity_type, name, recs, stats),
+        "confidence_score": conf, "confidence_label": ai_confidence_label(conf),
+        "prediction_period": period_label, "generated_date": now_iso(),
+    }
+
+
+def _entity_actions(entity_type, key, today_iso):
+    if entity_type == "location":
+        pool = [a for a in DB["corrective_actions"] if a.get("location") == key and a["status"] == "open"]
+    elif entity_type == "department":
+        pool = [a for a in DB["corrective_actions"] if a["dept_key"] == key and a["status"] == "open"]
+    else:
+        pool = []
+    overdue = sum(1 for a in pool if a.get("due") and a["due"] < today_iso)
+    return len(pool), overdue
+
+
+def _ai_records(yr, mo, week, dept, location, contractor, equipment, activity, free):
+    member_ids = None
+    if contractor and str(contractor).isdigit():
+        member_ids = {u["id"] for u in DB["users"] if u.get("company_id") == int(contractor)}
+    out = []
+    for r in _norm_reports(year=yr, month=mo, dept=dept, location=location, free=free):
+        if r["rec"].get("status") == "rejected":
+            continue
+        if week and week_in_month(r["ts"]) != week:
+            continue
+        rec = r["rec"]
+        if equipment and rec.get("equipment_involved") != equipment:
+            continue
+        if activity and rec.get("activity") != activity:
+            continue
+        if member_ids is not None and r["reporter_id"] not in member_ids:
+            continue
+        out.append(r)
+    return out
+
+
+def ai_overdue_risk():
+    """Open corrective actions that are overdue or due within 7 days."""
+    t = today()
+    today_iso = t.isoformat()
+    soon = (t + timedelta(days=7)).isoformat()
+    out = []
+    for a in DB["corrective_actions"]:
+        if a["status"] != "open" or not a.get("due"):
+            continue
+        if a["due"] < today_iso:
+            risk = "Overdue"
+        elif a["due"] <= soon:
+            risk = "At risk"
+        else:
+            continue
+        out.append({"id": a["id"], "dept_key": a["dept_key"], "location": a.get("location", ""),
+                    "owner_id": a.get("owner_id"), "due": a["due"], "description": a.get("description", ""),
+                    "risk": risk})
+    out.sort(key=lambda a: (0 if a["risk"] == "Overdue" else 1, a["due"]))
+    return out
+
+
+def ai_predict(year=None, month=None, period="month", week=None, dept=None, location=None,
+               contractor=None, equipment=None, activity=None, free=True):
+    """Generate explainable, rule-based risk predictions from approved records."""
+    t = today()
+    yr = year or t.year
+    mo = month or t.month
+    if period == "week":
+        if not week:
+            week = week_in_month(t) if (yr == t.year and mo == t.month) else 1
+        period_label = "Week %d in %s %d" % (week, month_name(mo), yr)
+        window_days = 7
+    else:
+        week = None
+        period_label = "%s %d" % (month_name(mo), yr)
+        window_days = 30
+
+    recs = _ai_records(yr, mo, week, dept, location, contractor, equipment, activity, free)
+
+    # Minimum-data guard (do not show a misleading prediction).
+    if len(recs) < AI_MIN_RECORDS or _activity_span_days() < AI_MIN_DAYS:
+        return {"ok": False, "period_label": period_label, "have": len(recs), "need": AI_MIN_RECORDS,
+                "message": "More safety records are required before a reliable prediction can be generated."}
+
+    if period == "week":
+        prev = _ai_records(yr, mo, week - 1, dept, location, contractor, equipment, activity, free) if week and week > 1 else []
+    else:
+        pmo = mo - 1 if mo > 1 else 12
+        pyr = yr if mo > 1 else yr - 1
+        prev = _ai_records(pyr, pmo, None, dept, location, contractor, equipment, activity, free)
+
+    today_iso = t.isoformat()
+
+    def prev_counts(keyfn):
+        c = Counter()
+        for r in prev:
+            k = keyfn(r)
+            if k:
+                c[k] += 1
+        return c
+
+    def build(entity_type, keyfn, namefn):
+        groups = {}
+        for r in recs:
+            k = keyfn(r)
+            if k:
+                groups.setdefault(k, []).append(r)
+        pc = prev_counts(keyfn)
+        preds = []
+        for k, rs in groups.items():
+            if len(rs) < AI_MIN_ENTITY:
+                continue
+            open_a, overdue_a = _entity_actions(entity_type, k, today_iso)
+            preds.append(_ai_prediction(entity_type, k, namefn(k), rs, open_a, overdue_a,
+                                        pc.get(k, 0), period_label, window_days))
+        preds.sort(key=lambda p: (-p["risk_score"], p["entity_name"]))
+        return preds
+
+    locations = build("location", lambda r: r["location"], lambda k: k)
+    departments = build("department", lambda r: r["dept_key"], lambda k: dept_name(k))
+    equipment_p = build("equipment", lambda r: r["rec"].get("equipment_involved"), lambda k: k)
+    activities = build("activity", lambda r: r["rec"].get("activity"), lambda k: k)
+    causes = build("cause", lambda r: r["cause_category"], lambda k: k)
+
+    # Contractors (group by reporting user's company).
+    cby, cprev = {}, Counter()
+    for r in recs:
+        u = user(r["reporter_id"])
+        if u and u.get("company_id"):
+            cby.setdefault(u["company_id"], []).append(r)
+    for r in prev:
+        u = user(r["reporter_id"])
+        if u and u.get("company_id"):
+            cprev[u["company_id"]] += 1
+    contractors = []
+    for cid, rs in cby.items():
+        if len(rs) < AI_MIN_ENTITY:
+            continue
+        members = {u["id"] for u in DB["users"] if u.get("company_id") == cid}
+        open_a = sum(1 for a in DB["corrective_actions"] if a.get("owner_id") in members and a["status"] == "open")
+        overdue_a = sum(1 for a in DB["corrective_actions"] if a.get("owner_id") in members
+                        and a["status"] == "open" and a.get("due") and a["due"] < today_iso)
+        contractors.append(_ai_prediction("contractor", cid, (company(cid) or {}).get("name", str(cid)),
+                                           rs, open_a, overdue_a, cprev.get(cid, 0), period_label, window_days))
+    contractors.sort(key=lambda p: -p["risk_score"])
+
+    all_open = sum(1 for a in DB["corrective_actions"] if a["status"] == "open")
+    all_overdue = sum(1 for a in DB["corrective_actions"] if a["status"] == "open"
+                      and a.get("due") and a["due"] < today_iso)
+    overall = _ai_prediction("overall", "all", "Overall operations", recs, all_open, all_overdue,
+                             len(prev), period_label, window_days)
+
+    everything = locations + departments + equipment_p + activities + causes + contractors
+    top = max(everything, key=lambda p: p["risk_score"]) if everything else overall
+    repeat_hazards = [p for p in (locations + equipment_p) if p["stats"]["repeat"] >= 1][:5]
+
+    return {
+        "ok": True, "period_label": period_label, "period": period, "overall": overall,
+        "locations": locations, "departments": departments, "equipment": equipment_p,
+        "activities": activities, "causes": causes, "contractors": contractors,
+        "overdue_actions": ai_overdue_risk(), "repeat_hazards": repeat_hazards,
+        "top": top, "generated_date": now_iso(),
+    }

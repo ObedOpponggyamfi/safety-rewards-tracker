@@ -184,6 +184,14 @@ an upgrade page at `/pro`.
   warnings, reviewer override-with-reason.
 - **Dashboard & Monthly Reports Centre** — module cards, simple bar charts (by
   location / risk / department / cause / actual-vs-potential), CSV + print view.
+- **AI Safety Insights** (`/ai`) — **Basic AI Safety Prediction (Included)**: a
+  transparent, rule-based risk engine that scores locations, departments, equipment,
+  activities, contractors and causes 0–100 (Low / Moderate / High / Critical) with a
+  **fully explainable "because it recorded …"** rationale, recommended action and
+  confidence on every prediction. Weekly/monthly with 8 filters, overdue-action and
+  repeat-hazard alerts, a minimum-data guard, and an advisory disclaimer. Heavy ML,
+  telemetry, multi-site forecasting and alerting are locked as **"Advanced AI Risk
+  Forecasting — Pro"**.
 
 **Free limits** (existing data is never deleted when a limit is reached — a clear
 upgrade message is shown instead): 1 company · 1 site · 5 locations · 2 departments ·

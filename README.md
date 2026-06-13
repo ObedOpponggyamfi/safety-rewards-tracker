@@ -160,6 +160,38 @@ symbol files were verified to resolve from Commons.
 
 ---
 
+## Free-tier HSE modules (Safety Pays Free)
+
+This build is the **Free Version** of Safety Pays. It gives basic HSE visibility;
+advanced analytics, AI, unlimited history, automation and enterprise controls are
+reserved for Pro / Enterprise and shown as locked **"Available in Pro"** cards with
+an upgrade page at `/pro`.
+
+- **Location Hotspots** (`/hotspots`) — reports by location/sub-location, top-5
+  ranking, per-type counts, open/overdue actions, highest risk, and a hotspot
+  status (Normal / Watch / High Risk / Critical) with **HSE-Admin-adjustable
+  thresholds**. Filters: month, year, department, location, report type, risk level.
+- **High-Potential Events** (`/highpotential`) — auto-flagged when the potential
+  consequence is Major/Catastrophic, the risk is Critical, or a reviewer flags it.
+- **Actual vs Potential consequence** on every report (Insignificant → Catastrophic),
+  with a "Low actual / high potential" focus card.
+- **Dept & Contractor Summary** (`/summary`) — basic counts (Free shows 2 departments
+  / 3 contractors) plus cause-category charts.
+- **Cause categories** — one controlled master value each (no duplicate variants).
+- **Property / Equipment Damage** (`/damage`) — damage type, asset, cost range,
+  downtime, repair status.
+- **Data Quality** (`/quality`) — completeness %, missing-field and classification
+  warnings, reviewer override-with-reason.
+- **Dashboard & Monthly Reports Centre** — module cards, simple bar charts (by
+  location / risk / department / cause / actual-vs-potential), CSV + print view.
+
+**Free limits** (existing data is never deleted when a limit is reached — a clear
+upgrade message is shown instead): 1 company · 1 site · 5 locations · 2 departments ·
+3 contractors · 50 employees · 2 SafePay Champions · 100 records per month ·
+current month + 90 days of detailed history · CSV export only.
+
+---
+
 ## Architecture
 
 | File | Responsibility |

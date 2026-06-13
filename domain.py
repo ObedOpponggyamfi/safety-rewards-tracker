@@ -12,6 +12,7 @@ This module owns:
 import json
 import os
 import random
+from collections import Counter
 from datetime import date, datetime, timedelta
 
 import adinkra
@@ -93,6 +94,62 @@ MONTHS = [
 ]
 
 # --------------------------------------------------------------------------
+# Plan tiering (this build is the Free Version)
+# --------------------------------------------------------------------------
+PLAN = "Free"
+FREE_LIMITS = {
+    "company": 1, "site": 1, "locations": 5, "departments": 2,
+    "contractors": 3, "employees": 50, "champions": 2,
+    "records_per_month": 100, "history_days": 90,
+}
+
+# Advanced capabilities reserved for paid tiers (rendered as locked cards).
+PRO_FEATURES = [
+    "AI Hazard Fingerprint", "AI Duplicate HID Detection", "Geographic hotspot maps",
+    "GPS & QR location capture", "Location risk prediction", "Unlimited location history",
+    "Contractor frequency rates", "Man-hours integration", "LTIFR & TRIFR calculations",
+    "Detailed root cause analysis", "Investigation workflow", "Cost analytics",
+    "Quarterly & yearly reports", "Automated corrective-action escalation",
+    "Power BI integration", "Multi-site comparison",
+]
+
+# --------------------------------------------------------------------------
+# HSE controlled vocabularies (single approved master value each)
+# --------------------------------------------------------------------------
+RISK_LEVELS = ["Low", "Medium", "High", "Critical"]
+RISK_RANK = {lvl: i for i, lvl in enumerate(RISK_LEVELS)}
+
+CONSEQUENCES = ["Insignificant", "Minor", "Moderate", "Major", "Catastrophic"]
+CONSEQUENCE_SEVERITY = {c: i + 1 for i, c in enumerate(CONSEQUENCES)}  # 1..5
+
+CAUSE_CATEGORIES = [
+    "Procedural", "Behavioural", "Equipment Condition", "Training Deficiency",
+    "Inadequate Supervision", "Communication Failure", "Coordination Failure",
+    "Environmental Condition", "Planning Failure", "Management System Failure", "Other",
+]
+
+COST_RANGES = [
+    "Below GHS 1,000", "GHS 1,000–5,000", "GHS 5,001–20,000",
+    "GHS 20,001–50,000", "Above GHS 50,000",
+]
+DAMAGE_TYPES = [
+    "Vehicle", "Fixed Plant", "Mobile Equipment", "Property / Structure",
+    "Tooling", "Electrical", "Other",
+]
+REPAIR_STATUS = ["Reported", "Under Repair", "Repaired", "Written Off"]
+
+DEFAULT_HOTSPOT_THRESHOLDS = {"watch": 3, "high": 6, "critical": 10}
+
+# Report-type registry used by the hotspot + summary modules.
+REPORT_TYPES = {
+    "incident": ("Incidents", "incidents"),
+    "hid": ("HIDs", "near_miss_hazard_reports"),       # type == Hazard
+    "near_miss": ("Near Misses", "near_miss_hazard_reports"),  # type == Near miss
+    "observation": ("Safety Observations", "safety_observations"),
+    "damage": ("Property / Equipment Damage", "property_damage"),
+}
+
+# --------------------------------------------------------------------------
 # Date helpers
 # --------------------------------------------------------------------------
 
@@ -149,6 +206,74 @@ def fmt_date(s):
 
 def fmt_money(amount):
     return "%s%s" % (CURRENCY, "{:,.0f}".format(amount))
+
+
+# --------------------------------------------------------------------------
+# Plan + HSE classification helpers
+# --------------------------------------------------------------------------
+
+
+def history_cutoff():
+    """Earliest date the Free Version shows in detail (last 90 days)."""
+    return today() - timedelta(days=FREE_LIMITS["history_days"])
+
+
+def within_free_history(ts):
+    """Free history = current month plus the previous 90 days."""
+    d = parse_dt(ts).date()
+    t = today()
+    return (d.year == t.year and d.month == t.month) or d >= history_cutoff()
+
+
+def severity_of(consequence):
+    return CONSEQUENCE_SEVERITY.get(consequence, 0)
+
+
+def risk_from_severity(sev):
+    if sev >= 5:
+        return "Critical"
+    if sev == 4:
+        return "High"
+    if sev == 3:
+        return "Medium"
+    return "Low"
+
+
+def highest_risk(levels):
+    """Return the most severe risk level from an iterable, or '' if none."""
+    best = ""
+    for lv in levels:
+        if lv and RISK_RANK.get(lv, -1) > RISK_RANK.get(best, -1):
+            best = lv
+    return best
+
+
+def record_is_high_potential(rec):
+    """A record is high-potential when the potential consequence is Major/
+    Catastrophic, the risk level is Critical, or a reviewer flagged it."""
+    if rec.get("is_high_potential"):
+        return True
+    if rec.get("potential_consequence") in ("Major", "Catastrophic"):
+        return True
+    if rec.get("risk_level") == "Critical":
+        return True
+    return False
+
+
+def hotspot_thresholds():
+    s = DB.get("settings", {})
+    return s.get("hotspot_thresholds", dict(DEFAULT_HOTSPOT_THRESHOLDS))
+
+
+def hotspot_status(total, th=None):
+    th = th or hotspot_thresholds()
+    if total >= th["critical"]:
+        return "Critical"
+    if total >= th["high"]:
+        return "High Risk"
+    if total >= th["watch"]:
+        return "Watch"
+    return "Normal"
 
 
 # --------------------------------------------------------------------------
@@ -212,9 +337,11 @@ def seed():
         "point_reset_events": [],
         "rewards": [],
         "reward_requests": [],
+        "property_damage": [],
         "yearly_reward_budgets": [],
         "monthly_reward_budgets": [],
         "quarterly_reward_budgets": [],
+        "settings": {"hotspot_thresholds": dict(DEFAULT_HOTSPOT_THRESHOLDS)},
     }
 
     # Departments straight from the Adinkra roster (no "Safety Team" labels).
@@ -403,6 +530,87 @@ def seed():
         "status": "under_review", "lti_reset_applied": True,
     })
     _apply_lti_reset(db, lti_dept, lti_ts, inc_id, lti_worker["id"])
+
+    # ---- Enrich reports with HSE classification (risk + consequence) ------
+    sub_locations = {
+        "Pit 4": ["North Wall", "South Ramp", "Loading Bay"],
+        "Process Plant": ["Mill 1", "Thickener", "Reagent Store"],
+        "Workshop": ["Wash Bay", "Welding Bay"],
+        "Haul Road": ["Switchback", "Intersection 3"],
+        "Stores": ["Yard", "Chemical Store"],
+        "Crusher": ["Primary", "Feed Conveyor"],
+        "Control Room": [],
+    }
+
+    def consequence_pair(escalate_bias=0):
+        actual = rng.choices(CONSEQUENCES, weights=[34, 30, 20, 10, 6])[0]
+        pi = min(4, CONSEQUENCES.index(actual) + rng.choice([0, 0, 1, 1, 2, 3]) + escalate_bias)
+        return actual, CONSEQUENCES[pi]
+
+    def enrich(rec, escalate_bias=0, with_cause=False):
+        subs = sub_locations.get(rec.get("location"), [])
+        rec["sub_location"] = rng.choice(subs) if subs and rng.random() < 0.7 else ""
+        actual, potential = consequence_pair(escalate_bias)
+        rec["actual_consequence"] = actual
+        rec["potential_consequence"] = potential
+        rec["actual_severity"] = severity_of(actual)
+        rec["potential_severity"] = severity_of(potential)
+        rec["actual_risk_rating"] = risk_from_severity(severity_of(actual))
+        rec["potential_risk_rating"] = risk_from_severity(severity_of(potential))
+        rec["risk_level"] = risk_from_severity(severity_of(potential))
+        if with_cause:
+            rec["cause_category"] = rng.choice(CAUSE_CATEGORIES)
+        rec["is_high_potential"] = record_is_high_potential(rec)
+        rec["high_potential_reason"] = ("Potential %s consequence." % potential) if rec["is_high_potential"] else ""
+        rec["reviewed_by"] = 1 if rec["is_high_potential"] else None
+        rec["review_date"] = rec["ts"] if rec["is_high_potential"] else None
+
+    for o in db["safety_observations"]:
+        enrich(o)
+    for h in db["near_miss_hazard_reports"]:
+        enrich(h, escalate_bias=1, with_cause=True)
+    for i in db["incidents"]:
+        enrich(i, escalate_bias=1, with_cause=True)
+    lti_inc = next(i for i in db["incidents"] if i["id"] == inc_id)
+    lti_inc.update({"actual_consequence": "Major", "potential_consequence": "Catastrophic",
+                    "actual_severity": severity_of("Major"), "potential_severity": severity_of("Catastrophic"),
+                    "risk_level": "Critical", "is_high_potential": True, "reviewed_by": 1,
+                    "review_date": lti_inc["ts"],
+                    "high_potential_reason": "Lost-time injury with catastrophic potential."})
+
+    # ---- Property / equipment damage events -------------------------------
+    equip = ["Haul Truck 12", "Excavator 3", "Conveyor CV02", "Light Vehicle 7", "Generator 2", "Crusher Liner"]
+    for pd_id in range(1, 9):
+        w = rng.choice(workers)
+        d = anchor - timedelta(days=rng.randint(0, 60))
+        ts = datetime(d.year, d.month, d.day, rng.randint(7, 17), 0).isoformat(timespec="seconds")
+        loc = rng.choice(locations)
+        actual, potential = consequence_pair(escalate_bias=1)
+        db["property_damage"].append({
+            "id": pd_id, "ts": ts, "reporter_id": w["id"], "dept_key": w["dept_key"],
+            "location": loc, "sub_location": (rng.choice(sub_locations.get(loc) or [""]) or ""),
+            "damage_type": rng.choice(DAMAGE_TYPES), "equipment_involved": rng.choice(equip),
+            "asset_number": "AST-%04d" % rng.randint(1000, 9999),
+            "estimated_cost_range": rng.choice(COST_RANGES),
+            "downtime_hours": rng.choice([0, 2, 4, 8, 12, 24, 48]),
+            "operational_impact": rng.choice(["None", "Minor delay", "Partial stoppage", "Full stoppage"]),
+            "repair_status": rng.choice(REPAIR_STATUS), "description": "Equipment / property damage reported.",
+            "actual_consequence": actual, "potential_consequence": potential,
+            "actual_severity": severity_of(actual), "potential_severity": severity_of(potential),
+            "risk_level": risk_from_severity(severity_of(potential)),
+            "is_high_potential": potential in ("Major", "Catastrophic"), "status": "open",
+        })
+
+    # Corrective actions get a location (for hotspot action counts) and the
+    # LTI incident records lost work days (used by data-quality validation).
+    for a in db["corrective_actions"]:
+        a.setdefault("location", rng.choice(locations))
+    lti_inc["lost_days"] = rng.randint(3, 30)
+
+    # ---- SafePay Champions (Free plan allows up to 2) ---------------------
+    champ_pool = [u for u in workers if not u["is_contractor"]]
+    for u in rng.sample(champ_pool, min(FREE_LIMITS["champions"], len(champ_pool))):
+        u["is_champion"] = True
 
     # ---- Reward requests across the 4-stage workflow ----------------------
     # submit -> admin approves -> finance approves -> released  (or rejected)
@@ -713,3 +921,280 @@ def department_leaderboard(year=None, month=None, quarter=None):
 def champion_marker(rank):
     """Champion emoji for the top three places; plain number otherwise."""
     return {1: "\U0001F3C6", 2: "\U0001F948", 3: "\U0001F949"}.get(rank, "#%d" % rank)
+
+
+# --------------------------------------------------------------------------
+# HSE modules: hotspots, high-potential, summaries, cause, damage, quality
+# --------------------------------------------------------------------------
+
+
+def _norm_reports(year=None, month=None, dept=None, location=None, report_type=None,
+                  risk_level=None, free=True):
+    """Normalised stream of safety records across every reporting module."""
+    res = []
+
+    def consider(rec, rtype):
+        ts = rec.get("ts")
+        if not ts:
+            return
+        d = parse_dt(ts).date()
+        if year and d.year != year:
+            return
+        if month and d.month != month:
+            return
+        if free and not within_free_history(ts):
+            return
+        if dept and rec.get("dept_key") != dept:
+            return
+        if location and (rec.get("location") or "—") != location:
+            return
+        if report_type and rtype != report_type:
+            return
+        if risk_level and rec.get("risk_level") != risk_level:
+            return
+        res.append({
+            "rtype": rtype, "location": rec.get("location") or "—",
+            "sub_location": rec.get("sub_location") or "", "dept_key": rec.get("dept_key"),
+            "reporter_id": rec.get("reporter_id"), "risk_level": rec.get("risk_level") or "",
+            "ts": ts, "high_potential": record_is_high_potential(rec),
+            "cause_category": rec.get("cause_category") or "", "rec": rec,
+        })
+
+    for i in DB["incidents"]:
+        consider(i, "incident")
+    for h in DB["near_miss_hazard_reports"]:
+        consider(h, "hid" if h.get("type") == "Hazard" else "near_miss")
+    for o in DB["safety_observations"]:
+        consider(o, "observation")
+    for p in DB.get("property_damage", []):
+        consider(p, "damage")
+    return res
+
+
+def location_options():
+    locs = set()
+    for coll in ("incidents", "near_miss_hazard_reports", "safety_observations", "property_damage"):
+        for r in DB.get(coll, []):
+            if r.get("location"):
+                locs.add(r["location"])
+    return sorted(locs)
+
+
+def _open_overdue_actions_by_location():
+    today_iso = today().isoformat()
+    opened, overdue = Counter(), Counter()
+    for a in DB["corrective_actions"]:
+        if a["status"] != "open":
+            continue
+        loc = a.get("location") or "—"
+        opened[loc] += 1
+        if a.get("due") and a["due"] < today_iso:
+            overdue[loc] += 1
+    return opened, overdue
+
+
+def location_hotspots(year=None, month=None, dept=None, location=None, report_type=None,
+                      risk_level=None, free=True):
+    reports = _norm_reports(year=year, month=month, dept=dept, location=location,
+                            report_type=report_type, risk_level=risk_level, free=free)
+    opened, overdue = _open_overdue_actions_by_location()
+    locs = {}
+
+    def slot(name):
+        return locs.setdefault(name, {
+            "location": name, "total": 0, "incident": 0, "hid": 0, "near_miss": 0,
+            "observation": 0, "damage": 0, "unsafe": 0, "open_actions": 0,
+            "overdue_actions": 0, "risks": [],
+        })
+
+    for r in reports:
+        s = slot(r["location"])
+        s["total"] += 1
+        s[r["rtype"]] += 1
+        if r["rtype"] == "observation" and r["rec"].get("category") == "Unsafe condition":
+            s["unsafe"] += 1
+        s["risks"].append(r["risk_level"])
+    for name, n in opened.items():
+        slot(name)["open_actions"] = n
+    for name, n in overdue.items():
+        slot(name)["overdue_actions"] = n
+
+    rows = list(locs.values())
+    for s in rows:
+        s["highest_risk"] = highest_risk(s["risks"])
+        s["status"] = hotspot_status(s["total"])
+    rows.sort(key=lambda s: (-s["total"], s["location"]))
+    return rows
+
+
+def high_potential_events(year=None, month=None, dept=None, location=None, free=True):
+    rows = [r for r in _norm_reports(year=year, month=month, dept=dept, location=location, free=free)
+            if r["high_potential"]]
+    rows.sort(key=lambda r: r["ts"], reverse=True)
+    return rows
+
+
+def low_actual_high_potential(year=None, month=None, free=True):
+    """Records with low actual impact but Major/Catastrophic potential."""
+    out = []
+    for r in _norm_reports(year=year, month=month, free=free):
+        rec = r["rec"]
+        if (rec.get("actual_consequence") in ("Insignificant", "Minor", "Moderate")
+                and rec.get("potential_consequence") in ("Major", "Catastrophic")):
+            out.append(r)
+    out.sort(key=lambda r: r["ts"], reverse=True)
+    return out
+
+
+def dept_summary(year=None, month=None, free=True):
+    today_iso = today().isoformat()
+    yr = year or today().year
+    mo = month or today().month
+    rows = []
+    for d in DB["departments"]:
+        reps = _norm_reports(year=year, month=month, dept=d["key"], free=free)
+        open_a = [a for a in DB["corrective_actions"] if a["dept_key"] == d["key"] and a["status"] == "open"]
+        rows.append({
+            "dept_key": d["key"], "adinkra_name": d["adinkra_name"], "department": d.get("department", ""),
+            "total": len(reps),
+            "incidents": sum(1 for r in reps if r["rtype"] == "incident"),
+            "hids": sum(1 for r in reps if r["rtype"] == "hid"),
+            "near_misses": sum(1 for r in reps if r["rtype"] == "near_miss"),
+            "high_potential": sum(1 for r in reps if r["high_potential"]),
+            "open_actions": len(open_a),
+            "overdue_actions": sum(1 for a in open_a if a.get("due") and a["due"] < today_iso),
+            "points": dept_points(d["key"], year=yr, month=mo),
+        })
+    rows.sort(key=lambda r: (-r["total"], r["adinkra_name"]))
+    return rows
+
+
+def contractor_summary(year=None, month=None, free=True):
+    today_iso = today().isoformat()
+    rows = []
+    for c in DB["companies"]:
+        members = {u["id"] for u in DB["users"] if u.get("company_id") == c["id"]}
+        reps = [r for r in _norm_reports(year=year, month=month, free=free) if r["reporter_id"] in members]
+        open_a = [a for a in DB["corrective_actions"] if a.get("owner_id") in members and a["status"] == "open"]
+        rows.append({
+            "company_id": c["id"], "name": c["name"], "total": len(reps),
+            "incidents": sum(1 for r in reps if r["rtype"] == "incident"),
+            "hids": sum(1 for r in reps if r["rtype"] == "hid"),
+            "near_misses": sum(1 for r in reps if r["rtype"] == "near_miss"),
+            "high_potential": sum(1 for r in reps if r["high_potential"]),
+            "damage": sum(1 for r in reps if r["rtype"] == "damage"),
+            "open_actions": len(open_a),
+            "overdue_actions": sum(1 for a in open_a if a.get("due") and a["due"] < today_iso),
+        })
+    rows.sort(key=lambda r: (-r["total"], r["name"]))
+    return rows
+
+
+def cause_category_counts(year=None, month=None, dept=None, location=None, free=True, high_only=False):
+    c = Counter()
+    for r in _norm_reports(year=year, month=month, dept=dept, location=location, free=free):
+        if r["rtype"] in ("incident", "hid", "near_miss") and r["cause_category"]:
+            if high_only and not r["high_potential"]:
+                continue
+            c[r["cause_category"]] += 1
+    return c
+
+
+def damage_items(year=None, month=None, free=True):
+    out = []
+    for p in DB.get("property_damage", []):
+        d = parse_dt(p["ts"]).date()
+        if year and d.year != year:
+            continue
+        if month and d.month != month:
+            continue
+        if free and not within_free_history(p["ts"]):
+            continue
+        out.append(p)
+    return out
+
+
+def records_this_month():
+    """Count of all detailed safety records created in the current month."""
+    yr, mo = today().year, today().month
+    n = 0
+    for coll in ("incidents", "near_miss_hazard_reports", "safety_observations", "property_damage"):
+        for r in DB.get(coll, []):
+            d = parse_dt(r["ts"]).date()
+            if d.year == yr and d.month == mo:
+                n += 1
+    return n
+
+
+def at_record_limit():
+    return records_this_month() >= FREE_LIMITS["records_per_month"]
+
+
+def validate_record(kind, data):
+    """Pre-submission data-quality warnings. Returns a list of warning strings.
+
+    A Supervisor / HSE reviewer may override by supplying a reason.
+    """
+    warnings = []
+    if not (data.get("location") or "").strip():
+        warnings.append("Location is required.")
+    if not (data.get("description") or "").strip():
+        warnings.append("A description is required.")
+    if kind == "hid" and data.get("type") == "Near miss":
+        if data.get("actual_consequence") in ("Major", "Catastrophic"):
+            warnings.append("A Near Miss should not record a serious actual injury — reclassify as an Incident.")
+    if kind == "incident" and data.get("lti") == "1":
+        try:
+            if int(data.get("lost_days") or 0) <= 0:
+                warnings.append("A Lost Time Injury must record the number of lost work days.")
+        except ValueError:
+            warnings.append("Lost work days must be a number.")
+    return warnings
+
+
+def data_quality(free=True):
+    """Summary of data completeness and classification warnings across records."""
+    total = 0
+    missing = 0
+    warnings = 0
+    samples = []
+    today_iso = today().isoformat()
+
+    def scan(rec, kind, label):
+        nonlocal total, missing, warnings
+        total += 1
+        miss = not (rec.get("location") and rec.get("description"))
+        warn = False
+        if kind == "near_miss" and rec.get("actual_consequence") in ("Major", "Catastrophic"):
+            warn = True
+        if kind == "incident" and rec.get("lti") and not rec.get("lost_days"):
+            warn = True
+        if miss:
+            missing += 1
+        if warn:
+            warnings += 1
+        if (miss or warn) and not rec.get("dq_override") and len(samples) < 12:
+            samples.append({"kind": label, "id": rec.get("id"),
+                            "issue": "Missing required field" if miss else "Classification warning"})
+
+    for i in DB["incidents"]:
+        scan(i, "incident", "Incident")
+    for h in DB["near_miss_hazard_reports"]:
+        scan(h, "hid" if h.get("type") == "Hazard" else "near_miss",
+             "HID" if h.get("type") == "Hazard" else "Near Miss")
+    for o in DB["safety_observations"]:
+        scan(o, "observation", "Observation")
+    for p in DB.get("property_damage", []):
+        scan(p, "damage", "Damage")
+    for a in DB["corrective_actions"]:
+        total += 1
+        if a["status"] == "closed" and not a.get("closed_ts"):
+            warnings += 1
+            if len(samples) < 12:
+                samples.append({"kind": "Corrective Action", "id": a.get("id"),
+                                "issue": "Closed without a closure date"})
+
+    complete = total - missing
+    pct = round(100 * complete / total) if total else 100
+    return {"total": total, "missing": missing, "warnings": warnings,
+            "awaiting": missing + warnings, "completeness": pct, "samples": samples}

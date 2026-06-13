@@ -62,20 +62,53 @@ def page(title, active, body):
 def body_dashboard(user, qs):
     yr, mo = D.today().year, D.today().month
     q = D.quarter_of_month(mo)
-    obs = len([o for o in D.DB["safety_observations"]])
-    hid = len(D.DB["near_miss_hazard_reports"])
-    inc = len(D.DB["incidents"])
-    open_actions = len([a for a in D.DB["corrective_actions"] if a["status"] == "open"])
     pending_reviews = len([o for o in D.DB["safety_observations"] if o["status"] == "submitted"])
     pending_rewards = len([r for r in D.DB["reward_requests"] if r["status"] == "pending_admin"])
+    today_iso = D.today().isoformat()
 
-    cards = (
-        R.stat_card("Observations", obs, "all time")
-        + R.stat_card("Hazards / Near-misses", hid)
-        + R.stat_card("Incidents", inc)
-        + R.stat_card("Open corrective actions", open_actions)
-    )
-    top = '<div class="grid cols-4">%s</div>' % cards
+    reps = D._norm_reports(free=True)
+    n = lambda rt: sum(1 for r in reps if r["rtype"] == rt)
+    open_actions = [a for a in D.DB["corrective_actions"] if a["status"] == "open"]
+    overdue = [a for a in open_actions if a.get("due") and a["due"] < today_iso]
+    hotspots = D.location_hotspots(free=True)
+    causes = D.cause_category_counts(free=True)
+    dq = D.data_quality(free=True)
+    lahp = len(D.low_actual_high_potential(free=True))
+    top_loc = ("%s (%d)" % (hotspots[0]["location"], hotspots[0]["total"])) if hotspots else "—"
+    top_cause = causes.most_common(1)[0][0] if causes else "—"
+
+    top = R.section("HSE overview · current month + 90 days",
+        '<div class="grid cols-4">%s%s%s%s</div><div style="height:14px"></div>'
+        '<div class="grid cols-4">%s%s%s%s</div><div style="height:14px"></div>'
+        '<div class="grid cols-4">%s%s%s%s</div>' % (
+            R.stat_card("Total Incidents", n("incident")),
+            R.stat_card("Total HIDs", n("hid")),
+            R.stat_card("Total Near Misses", n("near_miss")),
+            R.stat_card("Total Observations", n("observation")),
+            R.stat_card("High-Potential Events", sum(1 for r in reps if r["high_potential"])),
+            R.stat_card("Property / Equipment Damage", n("damage")),
+            R.stat_card("Open Corrective Actions", len(open_actions)),
+            R.stat_card("Overdue Corrective Actions", len(overdue)),
+            R.stat_card("Top Hotspot Location", top_loc),
+            R.stat_card("Top Cause Category", top_cause),
+            R.stat_card("Low Actual / High Potential", lahp),
+            R.stat_card("Data Completeness", "%d%%" % dq["completeness"])))
+
+    by_loc = Counter(r["location"] for r in reps)
+    by_risk = Counter(r["risk_level"] or "Unspecified" for r in reps)
+    by_dept = Counter(D.dept_name(r["dept_key"]) for r in reps)
+    actual_dist = Counter(r["rec"].get("actual_consequence") or "—" for r in reps)
+    potential_dist = Counter(r["rec"].get("potential_consequence") or "—" for r in reps)
+    ordered = lambda c, order: [(k, c.get(k, 0)) for k in order if c.get(k, 0)]
+    top += ('<div class="grid cols-2">%s%s</div>' % (
+                R.section("Reports by location", R.bar_chart(by_loc.most_common(8))),
+                R.section("Reports by risk level", R.bar_chart(ordered(by_risk, D.RISK_LEVELS) or by_risk.most_common())))
+            + '<div class="grid cols-2">%s%s</div>' % (
+                R.section("Reports by department", R.bar_chart(by_dept.most_common(8))),
+                R.section("Top cause categories", R.bar_chart(causes.most_common(5))))
+            + '<div class="grid cols-2">%s%s</div>' % (
+                R.section("Actual consequences", R.bar_chart(ordered(actual_dist, D.CONSEQUENCES))),
+                R.section("Potential consequences", R.bar_chart(ordered(potential_dist, D.CONSEQUENCES)))))
 
     # Personal panel for workers / contractors.
     personal = ""
@@ -142,8 +175,9 @@ def body_observation_form(user, qs):
       </div>
       <div class="field"><label>Location</label><input name="location" placeholder="e.g. Process Plant" required></div>
       <div class="field"><label>What did you observe?</label><textarea name="description" required></textarea></div>
+      %s
       <button class="btn gold" type="submit">Submit observation (+%d pts on approval)</button>
-    </form>""" % (dept_opts, cat_opts, D.POINTS["observation"])
+    </form>""" % (dept_opts, cat_opts, R.hse_fields(), D.POINTS["observation"])
     recent = [o for o in D.DB["safety_observations"] if o["reporter_id"] == user["id"]][-6:][::-1]
     rows = [[D.fmt_date(o["ts"]), R.esc(o["category"]), R.esc(o["location"]), R.status_badge(o["status"])] for o in recent]
     return R.section("Report a safety observation", form) + \
@@ -161,8 +195,9 @@ def body_hid_form(user, qs):
       </div>
       <div class="field"><label>Location</label><input name="location" required></div>
       <div class="field"><label>Describe the hazard or near-miss</label><textarea name="description" required></textarea></div>
+      %s
       <button class="btn gold" type="submit">Submit report (+%d pts on approval)</button>
-    </form>""" % (dept_opts, D.POINTS["hid"])
+    </form>""" % (dept_opts, R.hse_fields(include_cause=True), D.POINTS["hid"])
     return R.section("Hazard / Near-miss report (HID)", form)
 
 
@@ -176,10 +211,11 @@ def body_incident_form(user, qs):
       </div>
       <div class="field"><label>Location</label><input name="location" required></div>
       <div class="field"><label>Describe the incident</label><textarea name="description" required></textarea></div>
+      %s
       <label class="field"><input type="checkbox" name="lti" value="1" style="width:auto;margin-right:8px">This was a Lost Time Injury (triggers department point reset)</label>
       <button class="btn gold" type="submit">Report incident (+%d pts)</button>
       <p class="hint">Reporting incidents promptly is rewarded. A Lost Time Injury resets the department's monthly safety points and is logged for audit.</p>
-    </form>""" % (dept_opts, D.POINTS["incident"])
+    </form>""" % (dept_opts, R.hse_fields(include_cause=True, include_lost_days=True), D.POINTS["incident"])
     return R.section("Report an incident", form)
 
 
@@ -561,15 +597,27 @@ def body_reports(user, qs):
     mo = qint(qs, "month", D.today().month)
     q = D.quarter_of_month(mo)
     mlabel = "%s %d" % (D.month_name(mo), yr)
+    dept = q1(qs, "dept") or None
+    loc = q1(qs, "location") or None
     rep = _month_records(yr, mo)
+    hipo = D.high_potential_events(year=yr, month=mo, dept=dept, location=loc, free=False)
+    dmg = D.damage_items(year=yr, month=mo, free=False)
+    cc = D.cause_category_counts(year=yr, month=mo, dept=dept, location=loc, free=False)
+    hs = D.location_hotspots(year=yr, month=mo, dept=dept, location=loc, free=False)[:5]
+    lahp = D.low_actual_high_potential(year=yr, month=mo, free=False)
 
     controls = """<form class="filter-bar" method="get">
       <div class="field"><label>Month</label>%s</div>
       <div class="field"><label>Quarter (auto from month)</label><div>%s</div></div>
-      <div class="field"><label>Year</label><input name="year" value="%d" style="width:90px"></div>
+      <div class="field"><label>Year</label><input name="year" value="%d" style="width:80px"></div>
+      <div class="field"><label>Department</label><select name="dept">%s</select></div>
+      <div class="field"><label>Location</label><select name="location">%s</select></div>
       <button class="btn">Generate</button>
-      <a class="btn ghost" href="/reports.csv?%s">Export full report (CSV)</a>
-    </form>""" % (R.month_select("month", mo), R.quarter_box(mo), yr, urlencode({"year": yr, "month": mo}))
+      <button type="button" class="btn ghost" onclick="window.print()">Print view</button>
+      <a class="btn ghost" href="/reports.csv?%s">Export CSV</a>
+    </form>""" % (R.month_select("month", mo), R.quarter_box(mo), yr, _dept_opts(dept),
+                  _opts([(l, l) for l in D.location_options()], loc, "All locations"),
+                  urlencode({"year": yr, "month": mo, "dept": dept or "", "location": loc or ""}))
     intro = ('<p class="hint">Auto-generated monthly reports for every module &mdash; <strong>%s</strong>. '
              'The quarter (<strong>%s</strong>) is derived automatically from the selected month.</p>'
              % (mlabel, D.quarter_label(q)))
@@ -592,7 +640,12 @@ def body_reports(user, qs):
         + grid(R.stat_card("Lost Time Injuries", len(rep["lti"])),
                R.stat_card("Actions closed", len(rep["ca_closed"])),
                R.stat_card("Reward requests", len(rep["rq"])),
-               R.stat_card("Reward spend", D.fmt_money(rep["reward_spend"]))))
+               R.stat_card("Reward spend", D.fmt_money(rep["reward_spend"])))
+        + '<div style="height:14px"></div>'
+        + grid(R.stat_card("High-Potential Events", len(hipo)),
+               R.stat_card("Property / Equipment Damage", len(dmg)),
+               R.stat_card("Open Corrective Actions", len(rep["ca_open_now"])),
+               R.stat_card("Overdue Corrective Actions", len(rep["ca_overdue"]))))
 
     # ---- Incidents / LTI / HID / Near Miss / Observations ------------------
     obs_status = Counter(o["status"] for o in rep["obs"])
@@ -665,8 +718,44 @@ def body_reports(user, qs):
     contractors = R.section("Contractors · %s" % mlabel,
         R.table(["#", "Contractor company", "Members", "Points", "Reward spend"], crows, "No contractor activity."))
 
+    # ---- High-Potential, Damage, Hotspots, Cause, Actual-vs-Potential -----
+    hipo_equip = sum(1 for e in hipo if e["rtype"] == "damage" or e["rec"].get("equipment_involved"))
+    hipo_sec = R.section("High-Potential Events · %s" % mlabel,
+        grid(R.stat_card("Total", len(hipo)),
+             R.stat_card("Involving equipment", hipo_equip),
+             R.stat_card("Low actual / high potential", len(lahp)), cols=3))
+
+    equip_dmg = sum(1 for p in dmg if p.get("equipment_involved"))
+    downtime = sum(p.get("downtime_hours", 0) for p in dmg)
+    dmg_sec = R.section("Property / Equipment Damage · %s" % mlabel,
+        grid(R.stat_card("Total damage cases", len(dmg)),
+             R.stat_card("Equipment damage cases", equip_dmg),
+             R.stat_card("Total downtime (hrs)", downtime),
+             R.stat_card("Locations affected", len({p["location"] for p in dmg}))))
+
+    hs_rows = [["#%d" % i, R.esc(s["location"]), "<strong>%d</strong>" % s["total"], s["incident"], s["hid"],
+                s["near_miss"], R.risk_badge(s["highest_risk"]), R.hotspot_badge(s["status"])]
+               for i, s in enumerate(hs, 1)]
+    hotspot_sec = R.section("Top 5 hotspot locations · %s" % mlabel,
+        R.table(["Rank", "Location", "Total", "Incidents", "HIDs", "Near Miss", "Highest Risk", "Status"], hs_rows, "No reports."))
+
+    cause_sec = R.section("Top cause categories · %s" % mlabel, R.bar_chart(cc.most_common(5)))
+
+    reps_avp = D._norm_reports(year=yr, month=mo, dept=dept, location=loc, free=False)
+    actual_dist = Counter(r["rec"].get("actual_consequence") or "—" for r in reps_avp)
+    pot_dist = Counter(r["rec"].get("potential_consequence") or "—" for r in reps_avp)
+    avp_rows = [[R.esc(c), "%d" % actual_dist.get(c, 0), "%d" % pot_dist.get(c, 0)] for c in D.CONSEQUENCES]
+    avp_sec = R.section("Actual vs potential consequence · %s" % mlabel,
+        R.table(["Consequence", "Actual count", "Potential count"], avp_rows))
+
+    pro = R.section("Advanced reporting", '<div class="grid cols-3">%s%s%s</div>' % (
+        R.pro_card("Quarterly & yearly reports", "Roll-up reporting beyond the month."),
+        R.pro_card("Excel & PDF export", "Formatted exports; CSV is included free."),
+        R.pro_card("Scheduled reports", "Automated email delivery on a schedule.")))
+
     return (controls + intro + summary + observations + hid + nearmiss + incidents
-            + lti + actions + rewards + budget + departments + contractors)
+            + lti + hipo_sec + dmg_sec + actions + rewards + budget
+            + hotspot_sec + cause_sec + avp_sec + departments + contractors + pro)
 
 
 def body_budgets(user, qs):
@@ -764,45 +853,412 @@ def body_admin(user, qs):
 
 
 # --------------------------------------------------------------------------
+# Free-tier HSE modules
+# --------------------------------------------------------------------------
+
+
+def _rtype_label(rt):
+    return D.REPORT_TYPES.get(rt, (rt.title(),))[0]
+
+
+def _opts(items, cur, blank):
+    o = '<option value="">%s</option>' % R.esc(blank)
+    for val, label in items:
+        o += '<option value="%s"%s>%s</option>' % (R.esc(val), " selected" if str(val) == str(cur) else "", R.esc(label))
+    return o
+
+
+def _dept_opts(selected=None):
+    return _opts([(d["key"], "%s — %s" % (d["adinkra_name"], d.get("department", ""))) for d in D.DB["departments"]],
+                 selected, "All departments")
+
+
+def body_hotspots(user, qs):
+    f = dict(year=qint(qs, "year", D.today().year), month=qint(qs, "month") or None,
+             dept=q1(qs, "dept") or None, location=q1(qs, "location") or None,
+             report_type=q1(qs, "report_type") or None, risk_level=q1(qs, "risk_level") or None)
+    rows = D.location_hotspots(free=True, **f)
+    cap = D.FREE_LIMITS["locations"]
+    shown, hidden = rows[:cap], max(0, len(rows) - cap)
+
+    mo = f["month"]
+    mo_opts = '<option value="">Last 90 days</option>' + "".join(
+        '<option value="%d"%s>%s</option>' % (m, " selected" if m == mo else "", D.month_name(m)) for m in range(1, 13))
+    controls = """<form class="filter-bar" method="get">
+      <div class="field"><label>Month</label><select name="month">%s</select></div>
+      <div class="field"><label>Year</label><input name="year" value="%d" style="width:80px"></div>
+      <div class="field"><label>Department</label><select name="dept">%s</select></div>
+      <div class="field"><label>Location</label><select name="location">%s</select></div>
+      <div class="field"><label>Report type</label><select name="report_type">%s</select></div>
+      <div class="field"><label>Risk level</label><select name="risk_level">%s</select></div>
+      <button class="btn">Apply</button>
+      <a class="btn ghost" href="/hotspots.csv?%s">Export CSV</a>
+    </form>""" % (mo_opts, f["year"], _dept_opts(f["dept"]),
+                  _opts([(l, l) for l in D.location_options()], f["location"], "All locations"),
+                  _opts([(k, v[0]) for k, v in D.REPORT_TYPES.items()], f["report_type"], "All report types"),
+                  _opts([(r, r) for r in D.RISK_LEVELS], f["risk_level"], "All risk levels"),
+                  urlencode({k: (v if v else "") for k, v in f.items()}))
+
+    trows = []
+    for i, s in enumerate(shown, 1):
+        trows.append(["#%d" % i, R.esc(s["location"]), "<strong>%d</strong>" % s["total"],
+                      s["incident"], s["hid"], s["near_miss"], s["open_actions"], s["overdue_actions"],
+                      R.risk_badge(s["highest_risk"]), R.hotspot_badge(s["status"])])
+    table = R.table(["Rank", "Location", "Total Reports", "Incidents", "HIDs", "Near Misses",
+                     "Open Actions", "Overdue Actions", "Highest Risk", "Hotspot Status"], trows,
+                    "No reports in this range.")
+
+    reps = D._norm_reports(free=True, **f)
+    risk_counts = Counter(r["risk_level"] or "Unspecified" for r in reps)
+    risk_rows = [(lvl, risk_counts.get(lvl, 0)) for lvl in D.RISK_LEVELS if risk_counts.get(lvl, 0)]
+    charts = '<div class="grid cols-2">%s%s</div>' % (
+        R.section("Reports by location", R.bar_chart([(s["location"], s["total"]) for s in shown])),
+        R.section("Risk-level distribution", R.bar_chart(risk_rows)))
+    charts2 = R.section("Open corrective actions by location",
+                        R.bar_chart([(s["location"], s["open_actions"]) for s in shown if s["open_actions"]]))
+
+    th = D.hotspot_thresholds()
+    thresh = ""
+    if user["role"] in ("hse_manager", "admin"):
+        thresh = R.section("Hotspot thresholds (HSE Admin)", """<form class="card form-card" method="post" action="/hotspots">
+          <input type="hidden" name="action" value="thresholds">
+          <div class="row-inline">
+            <div class="field"><label>Watch &ge;</label><input name="watch" type="number" min="1" value="%d"></div>
+            <div class="field"><label>High Risk &ge;</label><input name="high" type="number" min="1" value="%d"></div>
+            <div class="field"><label>Critical &ge;</label><input name="critical" type="number" min="1" value="%d"></div>
+          </div><button class="btn">Save thresholds</button>
+          <p class="hint">0&ndash;%d Normal · %d&ndash;%d Watch · %d&ndash;%d High Risk · %d+ Critical.</p>
+        </form>""" % (th["watch"], th["high"], th["critical"], th["watch"] - 1, th["watch"],
+                      th["high"] - 1, th["high"], th["critical"] - 1, th["critical"]))
+
+    banner = R.limit_banner("Showing the top %d hotspot locations; %d more available in Pro." % (cap, hidden)) if hidden else ""
+    pro = R.section("Advanced hotspot analytics", '<div class="grid cols-3">%s%s%s</div>' % (
+        R.pro_card("Geographic hotspot maps", "GPS heatmaps, QR location capture & multi-site comparison."),
+        R.pro_card("Location risk prediction", "AI predicts emerging hotspots before they escalate."),
+        R.pro_card("Unlimited location history", "Full historical trend analysis beyond 90 days.")))
+    intro = ('<p class="hint">Locations where incidents, HIDs, near misses, unsafe conditions and '
+             'equipment damage are repeatedly reported. Default view: current month + previous 90 days.</p>')
+    return intro + controls + banner + R.section("Top hotspot locations", table) + charts + charts2 + thresh + pro
+
+
+def body_highpotential(user, qs):
+    yr = qint(qs, "year", D.today().year)
+    mo = qint(qs, "month") or None
+    dept = q1(qs, "dept") or None
+    evts = D.high_potential_events(year=yr, month=mo, dept=dept, free=True)
+    total = len(evts)
+    open_e = sum(1 for e in evts if e["rec"].get("status") in ("open", "under_review", "submitted"))
+    equip = sum(1 for e in evts if e["rtype"] == "damage" or e["rec"].get("equipment_involved"))
+    by_loc = Counter(e["location"] for e in evts)
+    by_dept = Counter(D.dept_name(e["dept_key"]) for e in evts)
+
+    mo_opts = '<option value="">Last 90 days</option>' + "".join(
+        '<option value="%d"%s>%s</option>' % (m, " selected" if m == mo else "", D.month_name(m)) for m in range(1, 13))
+    controls = """<form class="filter-bar" method="get">
+      <div class="field"><label>Month</label><select name="month">%s</select></div>
+      <div class="field"><label>Year</label><input name="year" value="%d" style="width:80px"></div>
+      <div class="field"><label>Department</label><select name="dept">%s</select></div>
+      <button class="btn">Apply</button></form>""" % (mo_opts, yr, _dept_opts(dept))
+
+    cards = '<div class="grid cols-4">%s%s%s%s</div>' % (
+        R.stat_card("High-Potential Events", total), R.stat_card("Open", open_e),
+        R.stat_card("Involving equipment", equip), R.stat_card("Locations affected", len(by_loc)))
+    trows = []
+    for e in evts[:100]:
+        rec = e["rec"]
+        trows.append([D.fmt_date(e["ts"]), R.badge(_rtype_label(e["rtype"]), "muted"),
+                      R.dept_label_html(e["dept_key"]), R.esc(e["location"]),
+                      R.esc(rec.get("actual_consequence", "")), R.esc(rec.get("potential_consequence", "")),
+                      R.risk_badge(e["risk_level"])])
+    table = R.table(["Date", "Type", "Department", "Location", "Actual", "Potential", "Risk"], trows,
+                    "No high-potential events in this range.")
+    charts = '<div class="grid cols-2">%s%s</div>' % (
+        R.section("High-potential by location", R.bar_chart(by_loc.most_common(8))),
+        R.section("High-potential by department", R.bar_chart(by_dept.most_common(8))))
+    pro = R.section("Advanced high-potential tools", '<div class="grid cols-3">%s%s%s</div>' % (
+        R.pro_card("Investigation workflow", "Structured ICAM-style investigations."),
+        R.pro_card("Failed critical control analysis", "Identify which controls failed."),
+        R.pro_card("AI identification", "Auto-flag high-potential events from text.")))
+    intro = ('<p class="hint">A record is high-potential when the potential consequence is Major or '
+             'Catastrophic, the risk level is Critical, or an HSE reviewer flags it.</p>')
+    return intro + controls + cards + charts + R.section("High-potential events", table) + pro
+
+
+def body_damage(user, qs):
+    yr = qint(qs, "year", D.today().year)
+    mo = qint(qs, "month") or None
+    items = D.damage_items(year=yr, month=mo, free=True)
+    by_loc = Counter(p["location"] for p in items)
+    equip = Counter(p["equipment_involved"] for p in items if p.get("equipment_involved"))
+    downtime = sum(p.get("downtime_hours", 0) for p in items)
+    cards = '<div class="grid cols-4">%s%s%s%s</div>' % (
+        R.stat_card("Damage cases", len(items)), R.stat_card("Total downtime (hrs)", downtime),
+        R.stat_card("Locations affected", len(by_loc)),
+        R.stat_card("Distinct assets", len({p.get("asset_number") for p in items})))
+
+    form = """<form method="post" action="/damage" class="card form-card">
+      <div class="row-inline">
+        <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
+        <div class="field"><label>Damage type</label><select name="damage_type">%s</select></div>
+      </div>
+      <div class="row-inline">
+        <div class="field"><label>Equipment involved</label><input name="equipment_involved"></div>
+        <div class="field"><label>Asset number</label><input name="asset_number"></div>
+      </div>
+      <div class="field"><label>Location</label><input name="location" required></div>
+      <div class="row-inline">
+        <div class="field"><label>Estimated cost range</label><select name="estimated_cost_range">%s</select></div>
+        <div class="field"><label>Downtime (hrs)</label><input name="downtime_hours" type="number" min="0" value="0"></div>
+        <div class="field"><label>Repair status</label><select name="repair_status">%s</select></div>
+      </div>
+      <div class="field"><label>Operational impact</label><input name="operational_impact" placeholder="e.g. Partial stoppage"></div>
+      <div class="field"><label>Describe the damage</label><textarea name="description" required></textarea></div>
+      %s
+      <button class="btn gold" type="submit">Log damage event</button>
+    </form>""" % ("".join('<option value="%s">%s — %s</option>' % (d["key"], R.esc(d["adinkra_name"]), R.esc(d.get("department", ""))) for d in D.DB["departments"]),
+                  "".join("<option>%s</option>" % R.esc(t) for t in D.DAMAGE_TYPES),
+                  "".join("<option>%s</option>" % R.esc(c) for c in D.COST_RANGES),
+                  "".join("<option>%s</option>" % R.esc(s) for s in D.REPAIR_STATUS),
+                  R.hse_fields())
+
+    rows = [[D.fmt_date(p["ts"]), R.esc(p["damage_type"]), R.esc(p.get("equipment_involved", "")),
+             R.esc(p.get("asset_number", "")), R.dept_label_html(p["dept_key"]), R.esc(p["location"]),
+             R.esc(p.get("estimated_cost_range", "")), p.get("downtime_hours", 0),
+             R.badge(p.get("repair_status", ""), "muted")] for p in items]
+    table = R.table(["Date", "Type", "Equipment", "Asset", "Department", "Location", "Cost range", "Downtime", "Repair"], rows,
+                    "No damage cases in this range.")
+    charts = '<div class="grid cols-2">%s%s</div>' % (
+        R.section("Damage by location", R.bar_chart(by_loc.most_common(8))),
+        R.section("Most-involved equipment", R.bar_chart(equip.most_common(8))))
+    pro = R.section("Advanced damage analytics", '<div class="grid cols-2">%s%s</div>' % (
+        R.pro_card("Exact cost tracking", "Precise financial cost capture & analytics."),
+        R.pro_card("Asset reliability trends", "Downtime and failure analytics per asset.")))
+    return cards + R.section("Report property / equipment damage", form) + charts + R.section("Damage cases", table) + pro
+
+
+def body_summary(user, qs):
+    yr = qint(qs, "year", D.today().year)
+    mo = qint(qs, "month") or None
+    dept = q1(qs, "dept") or None
+    mo_opts = '<option value="">Last 90 days</option>' + "".join(
+        '<option value="%d"%s>%s</option>' % (m, " selected" if m == mo else "", D.month_name(m)) for m in range(1, 13))
+    controls = """<form class="filter-bar" method="get">
+      <div class="field"><label>Month</label><select name="month">%s</select></div>
+      <div class="field"><label>Year</label><input name="year" value="%d" style="width:80px"></div>
+      <div class="field"><label>Department (cause filter)</label><select name="dept">%s</select></div>
+      <button class="btn">Apply</button>
+      <a class="btn ghost" href="/summary.csv?%s">Export CSV</a></form>""" % (
+        mo_opts, yr, _dept_opts(dept), urlencode({"year": yr, "month": mo or "", "dept": dept or ""}))
+
+    ds = D.dept_summary(year=yr, month=mo, free=True)
+    cap_d = D.FREE_LIMITS["departments"]
+    ds_shown, ds_hidden = ds[:cap_d], max(0, len(ds) - cap_d)
+    drows = [[R.dept_label_html(r["dept_key"]), r["total"], r["incidents"], r["hids"], r["near_misses"],
+              r["high_potential"], r["open_actions"], r["overdue_actions"], r["points"]] for r in ds_shown]
+    dept_tbl = R.table(["Department", "Total", "Incidents", "HIDs", "Near Miss", "High-Pot.", "Open", "Overdue", "Points"], drows)
+    dept_banner = R.limit_banner("Free shows %d departments; %d more available in Pro." % (cap_d, ds_hidden)) if ds_hidden else ""
+
+    cs = D.contractor_summary(year=yr, month=mo, free=True)
+    cap_c = D.FREE_LIMITS["contractors"]
+    cs_shown, cs_hidden = cs[:cap_c], max(0, len(cs) - cap_c)
+    crows = [[R.esc(r["name"]), r["incidents"], r["hids"], r["near_misses"], r["high_potential"],
+              r["damage"], r["open_actions"], r["overdue_actions"]] for r in cs_shown]
+    con_tbl = R.table(["Contractor", "Incidents", "HIDs", "Near Miss", "High-Pot.", "Damage", "Open", "Overdue"], crows)
+    con_banner = R.limit_banner("Free shows %d contractors; %d more available in Pro." % (cap_c, cs_hidden)) if cs_hidden else ""
+
+    cc = D.cause_category_counts(year=yr, month=mo, dept=dept, free=True)
+    cc_hi = D.cause_category_counts(year=yr, month=mo, free=True, high_only=True)
+    causes = '<div class="grid cols-2">%s%s</div>' % (
+        R.section("Top 5 cause categories", R.bar_chart(cc.most_common(5))),
+        R.section("Cause categories — high-potential events", R.bar_chart(cc_hi.most_common(5))))
+    pro = R.section("Advanced summary tools", '<div class="grid cols-3">%s%s%s</div>' % (
+        R.pro_card("Contractor scorecards", "Monthly & quarterly contractor ranking."),
+        R.pro_card("Frequency rates", "LTIFR / TRIFR with man-hours integration."),
+        R.pro_card("Unlimited departments", "Beyond the Free 2-department / 3-contractor cap.")))
+    return (controls + R.section("Department safety summary", dept_banner + dept_tbl)
+            + R.section("Contractor safety summary", con_banner + con_tbl) + causes + pro)
+
+
+def body_quality(user, qs):
+    dq = D.data_quality(free=True)
+    cards = '<div class="grid cols-4">%s%s%s%s</div>' % (
+        R.stat_card("Data completeness", "%d%%" % dq["completeness"]),
+        R.stat_card("Records missing info", dq["missing"]),
+        R.stat_card("Classification warnings", dq["warnings"]),
+        R.stat_card("Awaiting correction", dq["awaiting"]))
+    rows = [[R.esc(s["kind"]), "#%s" % s["id"], R.esc(s["issue"])] for s in dq["samples"]]
+    table = R.table(["Record", "ID", "Issue"], rows, "No outstanding data-quality issues.")
+    rules = R.section("Validation rules (Free)", """<div class="card"><ul style="margin:0;padding-left:18px;line-height:1.9">
+      <li>Required fields (location, description) must be completed before submission.</li>
+      <li>A Near Miss should not record a serious actual injury — reclassify as an Incident.</li>
+      <li>A Lost Time Injury must include lost work days.</li>
+      <li>A closed record must include a closure date.</li>
+      <li>Controlled vocabularies prevent duplicate department, location, cause and category values.</li>
+      <li>Supervisors / HSE reviewers may override a warning by entering a reason.</li>
+    </ul></div>""")
+    pro = R.section("Advanced data quality", '<div class="grid cols-2">%s%s</div>' % (
+        R.pro_card("AI contradiction detection", "Detects contradictory classifications automatically."),
+        R.pro_card("Bulk correction tools", "Mass-fix and audit data issues across history.")))
+    intro = '<p class="hint">Automatic validation surfaces missing fields and classification warnings so records stay clean.</p>'
+    return intro + cards + R.section("Records needing attention", table) + rules + pro
+
+
+def body_pro(user, qs):
+    L = D.FREE_LIMITS
+    limit_rows = [
+        ["Companies", "1", "Unlimited"], ["Sites", "1", "Multi-site"],
+        ["Locations", str(L["locations"]), "Unlimited"], ["Departments", str(L["departments"]), "Unlimited"],
+        ["Contractors", str(L["contractors"]), "Unlimited"], ["Employees", str(L["employees"]), "Unlimited"],
+        ["SafePay Champions", str(L["champions"]), "Unlimited"],
+        ["Records / month", str(L["records_per_month"]), "Unlimited"],
+        ["History", "Current month + %d days" % L["history_days"], "Unlimited"],
+        ["Export", "CSV only", "CSV · Excel · PDF · Power BI"],
+    ]
+    limits = R.section("Free plan limits", R.table(["Capability", "Free", "Pro / Enterprise"], limit_rows))
+    cards = "".join(R.pro_card(name) for name in D.PRO_FEATURES)
+    locked = R.section("Available in Pro & Enterprise", '<div class="grid cols-3">%s</div>' % cards)
+    cta = ('<div class="card" style="text-align:center"><h3 style="margin:0 0 6px">Upgrade Safety Pays</h3>'
+           '<p class="hint">Unlock AI analytics, unlimited history, investigation workflows, frequency rates, '
+           'maps and enterprise controls.</p><a class="btn gold" href="/pro">Talk to us about Pro</a></div>')
+    intro = '<p class="hint">You are on the <strong>%s</strong> plan. Existing data is never deleted when a limit is reached.</p>' % D.PLAN
+    return intro + cta + limits + locked
+
+
+def post_damage(user, form):
+    if D.at_record_limit():
+        return redirect("/damage", _limit_msg())
+    p = {"id": D.next_id("property_damage"), "ts": D.now_iso(), "reporter_id": user["id"],
+         "dept_key": q1(form, "dept_key", user["dept_key"]), "location": q1(form, "location", ""),
+         "damage_type": q1(form, "damage_type", "Other"), "equipment_involved": q1(form, "equipment_involved", ""),
+         "asset_number": q1(form, "asset_number", ""), "estimated_cost_range": q1(form, "estimated_cost_range", ""),
+         "operational_impact": q1(form, "operational_impact", ""), "repair_status": q1(form, "repair_status", "Reported"),
+         "description": q1(form, "description", ""), "status": "open"}
+    try:
+        p["downtime_hours"] = int(q1(form, "downtime_hours") or 0)
+    except ValueError:
+        p["downtime_hours"] = 0
+    warnings = _hse_from_form(p, form, "damage")
+    D.DB["property_damage"].append(p)
+    D.save()
+    msg = "Property / equipment damage logged."
+    if warnings and not p.get("dq_override"):
+        msg += " Data-quality warning(s): " + "; ".join(warnings)
+    return redirect("/damage", msg)
+
+
+def post_hotspots(user, form):
+    if user["role"] not in ("hse_manager", "admin"):
+        return redirect("/hotspots", "Only HSE Admin can adjust thresholds.")
+    if q1(form, "action") == "thresholds":
+        try:
+            th = {"watch": int(q1(form, "watch") or 3), "high": int(q1(form, "high") or 6),
+                  "critical": int(q1(form, "critical") or 10)}
+            D.DB.setdefault("settings", {})["hotspot_thresholds"] = th
+            D.save()
+            return redirect("/hotspots", "Hotspot thresholds updated.")
+        except ValueError:
+            return redirect("/hotspots", "Thresholds must be numbers.")
+    return redirect("/hotspots")
+
+
+# --------------------------------------------------------------------------
 # POST handlers
 # --------------------------------------------------------------------------
 
 
+def _hse_from_form(rec, form, kind):
+    """Populate risk/consequence/cause fields on a new report, derive the
+    high-potential flag, and return any data-quality warnings."""
+    ac = q1(form, "actual_consequence", "") or ""
+    pc = q1(form, "potential_consequence", "") or ""
+    rec["risk_level"] = q1(form, "risk_level", "") or ""
+    rec["actual_consequence"] = ac
+    rec["potential_consequence"] = pc
+    rec["actual_severity"] = D.severity_of(ac)
+    rec["potential_severity"] = D.severity_of(pc)
+    rec["actual_risk_rating"] = D.risk_from_severity(D.severity_of(ac)) if ac else ""
+    rec["potential_risk_rating"] = D.risk_from_severity(D.severity_of(pc)) if pc else ""
+    rec["sub_location"] = q1(form, "sub_location", "") or ""
+    if kind in ("hid", "near_miss", "incident"):
+        rec["cause_category"] = q1(form, "cause_category", "") or ""
+    if kind == "incident":
+        try:
+            rec["lost_days"] = int(q1(form, "lost_days") or 0)
+        except ValueError:
+            rec["lost_days"] = 0
+    rec["is_high_potential"] = D.record_is_high_potential(rec)
+    rec["high_potential_reason"] = ("Potential %s consequence." % pc) if (rec["is_high_potential"] and pc) else ""
+    rec["reviewed_by"] = rec["reviewed_by"] if rec.get("reviewed_by") else None
+    rec["review_date"] = rec.get("review_date")
+    check = dict(rec)
+    check["lti"] = q1(form, "lti")
+    warnings = D.validate_record(kind, check)
+    override = (q1(form, "override_reason") or "").strip()
+    rec["dq_warnings"] = warnings
+    if override:
+        rec["dq_override"] = True
+        rec["dq_override_reason"] = override
+    return warnings
+
+
+def _limit_msg():
+    return ("Free plan limit: %d records this month reached. Existing data is kept — "
+            "upgrade to Pro for unlimited records." % D.FREE_LIMITS["records_per_month"])
+
+
 def post_observation(user, form):
+    if D.at_record_limit():
+        return redirect("/report/observation", _limit_msg())
     o = {"id": D.next_id("safety_observations"), "ts": D.now_iso(),
          "reporter_id": user["id"], "dept_key": q1(form, "dept_key", user["dept_key"]),
          "location": q1(form, "location", ""), "category": q1(form, "category", "Observation"),
          "description": q1(form, "description", ""), "status": "submitted"}
+    warnings = _hse_from_form(o, form, "observation")
     D.DB["safety_observations"].append(o)
     D.save()
-    return redirect("/report/observation", "Observation submitted for review.")
+    msg = "Observation submitted for review."
+    if warnings and not o.get("dq_override"):
+        msg += " Data-quality warning(s): " + "; ".join(warnings)
+    return redirect("/report/observation", msg)
 
 
 def post_hid(user, form):
+    if D.at_record_limit():
+        return redirect("/report/hid", _limit_msg())
     h = {"id": D.next_id("near_miss_hazard_reports"), "ts": D.now_iso(),
          "reporter_id": user["id"], "dept_key": q1(form, "dept_key", user["dept_key"]),
          "type": q1(form, "type", "Hazard"), "severity": q1(form, "severity", "Low"),
          "location": q1(form, "location", ""), "description": q1(form, "description", ""),
          "status": "approved"}
+    kind = "hid" if h["type"] == "Hazard" else "near_miss"
+    warnings = _hse_from_form(h, form, kind)
     D.DB["near_miss_hazard_reports"].append(h)
     _award(user["id"], h["dept_key"], "hid", "near_miss_hazard_reports", h["id"])
     D.save()
-    return redirect("/report/hid", "Hazard/near-miss logged. +%d points." % D.POINTS["hid"])
+    msg = "Hazard/near-miss logged. +%d points." % D.POINTS["hid"]
+    if warnings and not h.get("dq_override"):
+        msg += " Data-quality warning(s): " + "; ".join(warnings)
+    return redirect("/report/hid", msg)
 
 
 def post_incident(user, form):
+    if D.at_record_limit():
+        return redirect("/report/incident", _limit_msg())
     is_lti = q1(form, "lti") == "1"
     inc = {"id": D.next_id("incidents"), "ts": D.now_iso(), "reporter_id": user["id"],
            "dept_key": q1(form, "dept_key", user["dept_key"]),
            "severity": q1(form, "severity", "Minor"), "lti": is_lti,
            "location": q1(form, "location", ""), "description": q1(form, "description", ""),
            "status": "under_review", "lti_reset_applied": is_lti}
+    warnings = _hse_from_form(inc, form, "incident")
     D.DB["incidents"].append(inc)
     _award(user["id"], inc["dept_key"], "incident", "incidents", inc["id"])
     msg = "Incident reported. +%d points." % D.POINTS["incident"]
     if is_lti:
         D._apply_lti_reset(D.DB, inc["dept_key"], inc["ts"], inc["id"], user["id"])
         msg += " Lost Time Injury logged — department monthly points reset."
+    if warnings and not inc.get("dq_override"):
+        msg += " Data-quality warning(s): " + "; ".join(warnings)
     D.save()
     return redirect("/report/incident", msg)
 
@@ -1061,6 +1517,24 @@ def csv_reports(user, qs):
     w.writerow(["Rewards", "Spend", rep["reward_spend"]])
     w.writerow(["Budget", "Monthly used", D.budget_used(yr, month=mo)])
     w.writerow(["Budget", "Quarter used", D.budget_used(yr, quarter=q)])
+    hipo = D.high_potential_events(year=yr, month=mo, free=False)
+    dmg = D.damage_items(year=yr, month=mo, free=False)
+    w.writerow(["High-Potential", "Total", len(hipo)])
+    w.writerow(["High-Potential", "Low actual / high potential", len(D.low_actual_high_potential(year=yr, month=mo, free=False))])
+    w.writerow(["Property/Equipment Damage", "Cases", len(dmg)])
+    w.writerow(["Property/Equipment Damage", "Downtime hours", sum(p.get("downtime_hours", 0) for p in dmg)])
+    for k, v in D.cause_category_counts(year=yr, month=mo, free=False).most_common():
+        w.writerow(["Cause Category", k, v])
+    reps_avp = D._norm_reports(year=yr, month=mo, free=False)
+    a_dist = Counter(r["rec"].get("actual_consequence") or "—" for r in reps_avp)
+    p_dist = Counter(r["rec"].get("potential_consequence") or "—" for r in reps_avp)
+    for c in D.CONSEQUENCES:
+        w.writerow(["Actual vs Potential", c, "actual=%d potential=%d" % (a_dist.get(c, 0), p_dist.get(c, 0))])
+
+    w.writerow([])
+    w.writerow(["Hotspot Rank", "Location", "TotalReports", "Incidents", "HIDs", "NearMisses", "HighestRisk", "Status"])
+    for i, s in enumerate(D.location_hotspots(year=yr, month=mo, free=False)[:5], 1):
+        w.writerow([i, s["location"], s["total"], s["incident"], s["hid"], s["near_miss"], s["highest_risk"], s["status"]])
 
     w.writerow([])
     w.writerow(["Department (Adinkra)", "Operational unit", "Points", "ActiveEmployees", "MonthlyLimit", "Used", "Remaining"])
@@ -1073,6 +1547,41 @@ def csv_reports(user, qs):
     for c in rep["contractors"]:
         w.writerow([c["name"], c["members"], c["points"], rep["comp_spend"].get(c["company_id"], 0)])
     return "monthly_report_%d_%02d.csv" % (yr, mo), out.getvalue()
+
+
+def csv_hotspots(user, qs):
+    f = dict(year=qint(qs, "year", D.today().year), month=qint(qs, "month") or None,
+             dept=q1(qs, "dept") or None, location=q1(qs, "location") or None,
+             report_type=q1(qs, "report_type") or None, risk_level=q1(qs, "risk_level") or None)
+    rows = D.location_hotspots(free=True, **f)[:D.FREE_LIMITS["locations"]]
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["Rank", "Location", "TotalReports", "Incidents", "HIDs", "NearMisses",
+                "OpenActions", "OverdueActions", "HighestRisk", "HotspotStatus"])
+    for i, s in enumerate(rows, 1):
+        w.writerow([i, s["location"], s["total"], s["incident"], s["hid"], s["near_miss"],
+                    s["open_actions"], s["overdue_actions"], s["highest_risk"], s["status"]])
+    return "hotspots.csv", out.getvalue()
+
+
+def csv_summary(user, qs):
+    yr = qint(qs, "year", D.today().year)
+    mo = qint(qs, "month") or None
+    dept = q1(qs, "dept") or None
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["Section", "Name", "Total", "Incidents", "HIDs", "NearMisses", "HighPotential", "Open", "Overdue", "Extra"])
+    for r in D.dept_summary(year=yr, month=mo, free=True)[:D.FREE_LIMITS["departments"]]:
+        w.writerow(["Department", "%s - %s" % (r["adinkra_name"], r["department"]), r["total"], r["incidents"],
+                    r["hids"], r["near_misses"], r["high_potential"], r["open_actions"], r["overdue_actions"], "points=%d" % r["points"]])
+    for r in D.contractor_summary(year=yr, month=mo, free=True)[:D.FREE_LIMITS["contractors"]]:
+        w.writerow(["Contractor", r["name"], r["total"], r["incidents"], r["hids"], r["near_misses"],
+                    r["high_potential"], r["open_actions"], r["overdue_actions"], "damage=%d" % r["damage"]])
+    w.writerow([])
+    w.writerow(["Cause Category", "Count"])
+    for k, v in D.cause_category_counts(year=yr, month=mo, dept=dept, free=True).most_common():
+        w.writerow([k, v])
+    return "summary.csv", out.getvalue()
 
 
 # --------------------------------------------------------------------------
@@ -1096,6 +1605,12 @@ GET_ROUTES = {
     "/reports": ("Report Centre", body_reports),
     "/budgets": ("Reward Budgets", body_budgets),
     "/admin": ("Admin Tools", body_admin),
+    "/hotspots": ("Location Hotspots", body_hotspots),
+    "/highpotential": ("High-Potential Events", body_highpotential),
+    "/damage": ("Property / Equipment Damage", body_damage),
+    "/summary": ("Dept & Contractor Summary", body_summary),
+    "/quality": ("Data Quality", body_quality),
+    "/pro": ("Upgrade to Pro", body_pro),
 }
 POST_ROUTES = {
     "/report/observation": post_observation,
@@ -1108,11 +1623,15 @@ POST_ROUTES = {
     "/rewards/releases": post_reward_finance,
     "/budgets": post_budgets,
     "/admin": post_admin,
+    "/damage": post_damage,
+    "/hotspots": post_hotspots,
 }
 CSV_ROUTES = {
     "/points.csv": csv_points,
     "/leaderboard.csv": csv_leaderboard,
     "/reports.csv": csv_reports,
+    "/hotspots.csv": csv_hotspots,
+    "/summary.csv": csv_summary,
 }
 # Route -> required permission predicate (user -> bool). Absent = any logged-in user.
 ROUTE_GUARDS = {

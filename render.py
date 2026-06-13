@@ -125,6 +125,53 @@ def reward_trail(r):
     return '<div class="trail-row">%s</div>' % "".join(parts) if parts else ""
 
 
+# -- Charts, risk/hotspot badges, Pro-locked cards (Free Version) --
+
+
+def bar_chart(rows, unit=""):
+    """Simple horizontal CSS bar chart. rows = [(label, value), ...]."""
+    rows = [(lbl, v) for lbl, v in rows]
+    if not rows:
+        return '<div class="empty">No data for this period.</div>'
+    mx = max((v for _, v in rows), default=0) or 1
+    bars = ""
+    for label, value in rows:
+        pct = round(100 * value / mx)
+        bars += ('<div class="bar-row"><span class="bar-label">%s</span>'
+                 '<span class="bar-track"><span class="bar-fill" style="width:%d%%"></span></span>'
+                 '<span class="bar-val">%s%s</span></div>'
+                 % (esc(label), pct, esc(value), esc(unit)))
+    return '<div class="bar-chart">%s</div>' % bars
+
+
+HOTSPOT_BADGE = {"Normal": "ok", "Watch": "warn", "High Risk": "hot", "Critical": "bad"}
+RISK_BADGE = {"Low": "muted", "Medium": "warn", "High": "hot", "Critical": "bad"}
+
+
+def hotspot_badge(status):
+    return badge(status, HOTSPOT_BADGE.get(status, "muted"))
+
+
+def risk_badge(level):
+    return badge(level, RISK_BADGE.get(level, "muted")) if level else '<span class="kpi-mini">—</span>'
+
+
+def pro_badge():
+    return '<span class="pro-badge">Available in Pro</span>'
+
+
+def pro_card(title, desc=""):
+    return ('<div class="card pro-locked"><div class="pro-top"><span class="pro-lock">🔒</span>%s</div>'
+            '<h3>%s</h3><div class="hint">%s</div>'
+            '<a class="btn gold sm" href="/pro">Upgrade</a></div>'
+            % (pro_badge(), esc(title), esc(desc)))
+
+
+def limit_banner(text):
+    return ('<div class="limit-banner"><strong>Free plan limit.</strong> %s '
+            '<a href="/pro">See Pro &rarr;</a></div>' % esc(text))
+
+
 def table(headers, rows, empty="No records."):
     if not rows:
         return '<div class="empty">%s</div>' % esc(empty)
@@ -157,11 +204,12 @@ def nav_for(user):
     """Return nav groups -> list of (href, label) the user may see."""
     role = user["role"]
     groups = []
-    groups.append(("Overview", [("/", "Dashboard")]))
+    groups.append(("Overview", [("/", "Dashboard"), ("/pro", "Upgrade to Pro")]))
 
     report = [("/report/observation", "Safety Observation"),
               ("/report/hid", "Hazard / Near-miss"),
-              ("/report/incident", "Incident")]
+              ("/report/incident", "Incident"),
+              ("/damage", "Property / Equipment Damage")]
     groups.append(("Report", report))
 
     work = []
@@ -170,6 +218,12 @@ def nav_for(user):
     work.append(("/actions", "Corrective Actions"))
     work.append(("/points", "Points Ledger"))
     groups.append(("Workflow", work))
+
+    groups.append(("HSE Insights", [
+        ("/hotspots", "Location Hotspots"),
+        ("/highpotential", "High-Potential Events"),
+        ("/summary", "Dept & Contractor Summary"),
+        ("/quality", "Data Quality")]))
 
     rewards = [("/rewards", "Reward Catalogue")]
     if role in D.REWARD_APPROVE_ROLES:
@@ -314,6 +368,29 @@ def quarter_box(month):
             % (q, D.quarter_label(q), esc(months)))
 
 
+def _sel(name, label, options, blank="—"):
+    opts = ('<option value="">%s</option>' % esc(blank)) + "".join("<option>%s</option>" % esc(o) for o in options)
+    return '<div class="field"><label>%s</label><select name="%s">%s</select></div>' % (esc(label), name, opts)
+
+
+def hse_fields(include_cause=False, include_lost_days=False):
+    """Risk + actual/potential consequence (+ optional cause) field group,
+    shared by the report forms. Supports the data-quality override reason."""
+    rows = ('<div class="row-inline">%s%s%s</div>'
+            % (_sel("risk_level", "Risk level", D.RISK_LEVELS),
+               _sel("actual_consequence", "Actual consequence", D.CONSEQUENCES),
+               _sel("potential_consequence", "Potential consequence", D.CONSEQUENCES)))
+    extra = ""
+    if include_cause:
+        extra += '<div class="row-inline">%s<div class="field"><label>Sub-location (optional)</label><input name="sub_location"></div></div>' % _sel("cause_category", "Cause category", D.CAUSE_CATEGORIES)
+    else:
+        extra += '<div class="field"><label>Sub-location (optional)</label><input name="sub_location"></div>'
+    if include_lost_days:
+        extra += '<div class="field"><label>Lost work days (required for an LTI)</label><input name="lost_days" type="number" min="0" value="0"></div>'
+    extra += '<div class="field"><label>Reviewer override reason (only if a data-quality warning appears)</label><input name="override_reason" placeholder="optional"></div>'
+    return rows + extra
+
+
 # --------------------------------------------------------------------------
 # CSS + JS
 # --------------------------------------------------------------------------
@@ -421,6 +498,26 @@ textarea{min-height:84px;resize:vertical}
 .trail{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:12px;background:#ece8df;color:#5d564a}
 .trail.ok{background:#dff3e6;color:#176c3c}
 .trail.bad{background:#fadbd6;color:#962014}
+.badge-hot{background:#fbe2cf;color:#9a4d10}
+.bar-chart{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
+.bar-row{display:flex;align-items:center;gap:10px;margin:6px 0;font-size:13px}
+.bar-label{flex:0 0 38%;text-align:right;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar-track{flex:1;background:#ece8df;border-radius:6px;height:14px;overflow:hidden}
+.bar-fill{display:block;height:100%;background:linear-gradient(90deg,var(--navy-2),var(--gold))}
+.bar-val{flex:0 0 60px;color:var(--muted);font-weight:600}
+.pro-locked{position:relative;border-style:dashed;background:#fbfaf6}
+.pro-locked h3{margin:6px 0 4px;font-size:15px;color:var(--navy)}
+.pro-top{display:flex;justify-content:space-between;align-items:center}
+.pro-lock{font-size:18px;opacity:.7}
+.pro-badge{display:inline-block;background:var(--gold-soft);color:#6a5410;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px}
+.pro-locked .btn{margin-top:10px}
+.limit-banner{background:#eef3f5;border:1px solid #cfe0e6;color:#1c4456;padding:10px 14px;border-radius:10px;margin-bottom:18px;font-size:13px}
+@media print{
+  .sidebar,.topbar,.foot,.btn,button,.filter-bar a,.section-actions,.pro-locked,.limit-banner{display:none!important}
+  .layout,main,.content{display:block;padding:0}
+  .card,.table-wrap,.bar-chart{box-shadow:none;border-color:#ccc;break-inside:avoid}
+  body{background:#fff}
+}
 """
 
 JS = """

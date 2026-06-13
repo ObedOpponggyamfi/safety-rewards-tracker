@@ -1,0 +1,365 @@
+"""Server-rendered HTML for Safety Rewards Tracker (standard library only)."""
+
+from html import escape
+
+import adinkra
+import domain as D
+
+
+def esc(value):
+    return escape(str(value if value is not None else ""))
+
+
+# --------------------------------------------------------------------------
+# Small components
+# --------------------------------------------------------------------------
+
+
+def symbol_img(commons_file, size=80, cls="adinkra-symbol"):
+    url = adinkra.symbol_url(commons_file, width=max(64, size * 2))
+    return ('<img class="%s" src="%s" alt="%s" loading="lazy" '
+            'style="width:%dpx;height:%dpx;object-fit:contain" />'
+            % (cls, esc(url), esc(commons_file), size, size))
+
+
+def champion(rank):
+    marker = D.champion_marker(rank)
+    cls = "champ champ-%d" % rank if rank <= 3 else "rank-num"
+    return '<span class="%s">%s</span>' % (cls, esc(marker))
+
+
+def stat_card(label, value, sub=""):
+    sub_html = '<div class="stat-sub">%s</div>' % esc(sub) if sub else ""
+    return ('<div class="card stat"><div class="stat-label">%s</div>'
+            '<div class="stat-value">%s</div>%s</div>'
+            % (esc(label), esc(value), sub_html))
+
+
+def badge(text, kind="muted"):
+    return '<span class="badge badge-%s">%s</span>' % (kind, esc(text))
+
+
+STATUS_BADGE = {
+    "submitted": "warn", "approved": "ok", "rejected": "bad",
+    "open": "warn", "closed": "ok", "under_review": "warn",
+    "pending_admin": "warn", "released": "ok",
+}
+
+
+def status_badge(status):
+    label = status.replace("_", " ").title()
+    return badge(label, STATUS_BADGE.get(status, "muted"))
+
+
+def table(headers, rows, empty="No records."):
+    if not rows:
+        return '<div class="empty">%s</div>' % esc(empty)
+    head = "".join("<th>%s</th>" % h for h in headers)  # headers may contain markup
+    body = ""
+    for r in rows:
+        body += "<tr>" + "".join("<td>%s</td>" % c for c in r) + "</tr>"
+    return ('<div class="table-wrap"><table><thead><tr>%s</tr></thead>'
+            '<tbody>%s</tbody></table></div>' % (head, body))
+
+
+def flash(msg):
+    if not msg:
+        return ""
+    return '<div class="flash">%s</div>' % esc(msg)
+
+
+def section(title, body, actions=""):
+    act = '<div class="section-actions">%s</div>' % actions if actions else ""
+    return ('<section class="block"><div class="block-head"><h2>%s</h2>%s</div>%s</section>'
+            % (esc(title), act, body))
+
+
+# --------------------------------------------------------------------------
+# Navigation
+# --------------------------------------------------------------------------
+
+
+def nav_for(user):
+    """Return nav groups -> list of (href, label) the user may see."""
+    role = user["role"]
+    groups = []
+    groups.append(("Overview", [("/", "Dashboard")]))
+
+    report = [("/report/observation", "Safety Observation"),
+              ("/report/hid", "Hazard / Near-miss"),
+              ("/report/incident", "Incident")]
+    groups.append(("Report", report))
+
+    work = []
+    if role in D.REVIEW_ROLES:
+        work.append(("/review", "Review Queue"))
+    work.append(("/actions", "Corrective Actions"))
+    work.append(("/points", "Points Ledger"))
+    groups.append(("Workflow", work))
+
+    rewards = [("/rewards", "Reward Catalogue")]
+    if role in D.REWARD_APPROVE_ROLES:
+        rewards.append(("/rewards/approvals", "Reward Approvals"))
+    if role in D.REWARD_RELEASE_ROLES:
+        rewards.append(("/rewards/releases", "Finance Releases"))
+    groups.append(("Rewards", rewards))
+
+    league = [("/leaderboard", "Leaderboards"),
+              ("/weekly", "Weekly Rewards"),
+              ("/adinkra", "Adinkra Identity"),
+              ("/league", "Adinkra League")]
+    groups.append(("Recognition", league))
+
+    admin = []
+    if role in D.REPORTS_ROLES:
+        admin.append(("/reports", "Report Centre"))
+    if D.can_view_budget(role):
+        admin.append(("/budgets", "Reward Budgets"))
+    if role == "admin":
+        admin.append(("/admin", "Admin Tools"))
+    if admin:
+        groups.append(("Management", admin))
+    return groups
+
+
+# --------------------------------------------------------------------------
+# Page shell
+# --------------------------------------------------------------------------
+
+
+def page(title, user, body, active="/", msg=""):
+    nav_html = ""
+    for group_name, items in nav_for(user):
+        links = ""
+        for href, label in items:
+            cls = "active" if href == active else ""
+            links += '<a class="%s" href="%s">%s</a>' % (cls, href, esc(label))
+        nav_html += '<div class="nav-group"><span class="nav-group-title">%s</span>%s</div>' % (esc(group_name), links)
+
+    brand = adinkra.BRAND_SYMBOL
+    return """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>%(title)s · Safety Rewards Tracker</title>
+<style>%(css)s</style>
+</head><body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">%(brand_img)s
+      <div><strong>Safety Rewards</strong><span>Reward Safety. Save Lives.</span></div>
+    </div>
+    <nav>%(nav)s</nav>
+  </aside>
+  <main>
+    <header class="topbar">
+      <div class="crumb">%(title)s</div>
+      <div class="who">
+        <span class="who-name">%(uname)s</span>
+        <span class="who-role">%(urole)s</span>
+        <a class="logout" href="/logout">Sign out</a>
+      </div>
+    </header>
+    <div class="content">
+      %(flash)s
+      %(body)s
+    </div>
+    <footer class="foot">Safety Rewards Tracker · Adinkra symbols courtesy of
+      <a href="https://commons.wikimedia.org/wiki/Category:SVG_Adinkra_symbols" target="_blank" rel="noopener">Wikimedia Commons</a></footer>
+  </main>
+</div>
+<script>%(js)s</script>
+</body></html>""" % {
+        "title": esc(title),
+        "css": CSS,
+        "js": JS,
+        "brand_img": symbol_img(brand["commons_file"], size=34, cls="brand-symbol"),
+        "nav": nav_html,
+        "uname": esc(user["name"]),
+        "urole": esc(D.role_label(user["role"])),
+        "flash": flash(msg),
+        "body": body,
+    }
+
+
+def login_page(users_by_role, msg=""):
+    options = ""
+    for role in D.ROLE_ORDER:
+        people = users_by_role.get(role, [])
+        if not people:
+            continue
+        opts = "".join('<option value="%d">%s</option>' % (u["id"], esc(u["name"])) for u in people)
+        options += '<optgroup label="%s">%s</optgroup>' % (esc(D.role_label(role)), opts)
+    brand = adinkra.BRAND_SYMBOL
+    return """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Sign in · Safety Rewards Tracker</title>
+<style>%(css)s</style></head>
+<body class="login-body">
+<div class="login-card">
+  <div class="login-brand">%(brand)s<h1>Safety Rewards Tracker</h1>
+  <p>Reward Safety. Reduce Risk. Save Lives.</p></div>
+  %(flash)s
+  <form method="post" action="/login">
+    <label>Choose a demo user</label>
+    <select name="user_id" required>%(options)s</select>
+    <button type="submit">Enter</button>
+  </form>
+  <p class="login-note">Demo login &mdash; each user carries a role. Budget modules are
+  visible only to HSE Manager, Management, Finance Manager and Admin; only the
+  Admin can edit a budget.</p>
+</div>
+</body></html>""" % {
+        "css": CSS,
+        "brand": symbol_img(brand["commons_file"], size=56, cls="brand-symbol"),
+        "options": options,
+        "flash": flash(msg),
+    }
+
+
+# --------------------------------------------------------------------------
+# Filter helpers (shared by leaderboards / reports / budgets)
+# --------------------------------------------------------------------------
+
+
+def month_select(name, value, with_quarter_hint=True, onchange=True):
+    opts = ""
+    for m in range(1, 13):
+        sel = "selected" if m == value else ""
+        opts += '<option value="%d" %s>%s</option>' % (m, sel, D.month_name(m))
+    oc = ' data-quarter-source="1"' if onchange else ""
+    return '<select name="%s"%s>%s</select>' % (name, oc, opts)
+
+
+def quarter_box(month):
+    q = D.quarter_of_month(month)
+    months = ", ".join(D.month_name(m) for m in D.quarter_months(q))
+    return ('<span class="quarter-box" id="quarterBox" data-q="%d">'
+            '<strong>%s</strong> <span class="q-months">(%s)</span></span>'
+            % (q, D.quarter_label(q), esc(months)))
+
+
+# --------------------------------------------------------------------------
+# CSS + JS
+# --------------------------------------------------------------------------
+CSS = """
+:root{
+  --bg:#f4f1ea; --panel:#ffffff; --ink:#1c1a17; --muted:#6b6457;
+  --navy:#13303d; --navy-2:#1c4456; --gold:#d4a017; --gold-soft:#f3e2b3;
+  --green:#1f9d55; --red:#c0392b; --warn:#c98a17; --line:#e6e0d4;
+  --shadow:0 1px 3px rgba(20,17,15,.08),0 6px 24px rgba(20,17,15,.06);
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Segoe UI",system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--ink);font-size:14.5px;line-height:1.5}
+a{color:var(--navy-2);text-decoration:none}
+a:hover{text-decoration:underline}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:248px;flex:0 0 248px;background:var(--navy);color:#e8eef0;position:sticky;top:0;height:100vh;overflow:auto;padding:18px 0}
+.brand{display:flex;gap:10px;align-items:center;padding:0 18px 16px;border-bottom:1px solid rgba(255,255,255,.1);margin-bottom:10px}
+.brand strong{display:block;font-size:15px}
+.brand span{display:block;font-size:11px;color:#9fb6bf}
+.brand-symbol{background:#fff;border-radius:8px;padding:3px}
+.nav-group{padding:8px 10px 4px}
+.nav-group-title{display:block;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:#7f9aa4;padding:6px 8px 2px}
+.nav-group a{display:block;color:#d7e2e6;padding:7px 10px;border-radius:7px;font-size:13.5px}
+.nav-group a:hover{background:rgba(255,255,255,.07);text-decoration:none}
+.nav-group a.active{background:var(--gold);color:#2a2305;font-weight:600}
+main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{display:flex;justify-content:space-between;align-items:center;padding:14px 26px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.crumb{font-weight:600;font-size:16px}
+.who{display:flex;align-items:center;gap:12px;font-size:13px}
+.who-name{font-weight:600}
+.who-role{background:var(--gold-soft);color:#6a5410;padding:2px 9px;border-radius:20px;font-size:12px}
+.logout{color:var(--red)}
+.content{padding:24px 26px;flex:1}
+.foot{padding:14px 26px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}
+h2{font-size:17px;margin:0}
+.block{margin-bottom:26px}
+.block-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:12px;flex-wrap:wrap}
+.section-actions{display:flex;gap:8px;flex-wrap:wrap}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;box-shadow:var(--shadow)}
+.grid{display:grid;gap:14px}
+.grid.cols-4{grid-template-columns:repeat(4,1fr)}
+.grid.cols-3{grid-template-columns:repeat(3,1fr)}
+.grid.cols-2{grid-template-columns:repeat(2,1fr)}
+@media(max-width:920px){.grid.cols-4,.grid.cols-3,.grid.cols-2{grid-template-columns:1fr 1fr}}
+.stat .stat-label{color:var(--muted);font-size:12.5px}
+.stat .stat-value{font-size:26px;font-weight:700;color:var(--navy)}
+.stat .stat-sub{color:var(--muted);font-size:12px;margin-top:2px}
+.table-wrap{overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);font-size:13.5px;vertical-align:middle}
+th{background:#faf7f0;color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em;position:sticky;top:0}
+tbody tr:hover{background:#fbfaf6}
+.empty{padding:22px;color:var(--muted);background:var(--panel);border:1px dashed var(--line);border-radius:12px;text-align:center}
+.badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11.5px;font-weight:600}
+.badge-ok{background:#dff3e6;color:#176c3c}
+.badge-warn{background:#fbeccd;color:#8a5e08}
+.badge-bad{background:#fadbd6;color:#962014}
+.badge-muted{background:#ece8df;color:#5d564a}
+.champ{font-size:18px}
+.rank-num{color:var(--muted);font-weight:600}
+.flash{background:var(--gold-soft);border:1px solid var(--gold);color:#6a5410;padding:10px 14px;border-radius:10px;margin-bottom:18px}
+.btn,button{font:inherit;cursor:pointer;border:1px solid var(--navy);background:var(--navy);color:#fff;padding:8px 14px;border-radius:9px;font-size:13.5px}
+.btn:hover,button:hover{background:var(--navy-2);text-decoration:none}
+.btn.ghost{background:#fff;color:var(--navy)}
+.btn.gold{background:var(--gold);border-color:var(--gold);color:#2a2305}
+.btn.ok{background:var(--green);border-color:var(--green)}
+.btn.bad{background:var(--red);border-color:var(--red)}
+.btn.sm{padding:5px 10px;font-size:12.5px;border-radius:7px}
+form.inline{display:inline}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:13px;font-weight:600;margin-bottom:5px}
+input,select,textarea{font:inherit;width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:9px;background:#fff}
+textarea{min-height:84px;resize:vertical}
+.form-card{max-width:620px}
+.row-inline{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+.row-inline .field{flex:1;min-width:150px;margin-bottom:0}
+.filter-bar{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:18px;box-shadow:var(--shadow)}
+.filter-bar .field{margin-bottom:0}
+.quarter-box{display:inline-block;background:var(--gold-soft);color:#6a5410;padding:8px 12px;border-radius:9px;font-size:13.5px}
+.q-months{color:#8a7a45;font-size:12px}
+.adinkra-card{display:flex;gap:16px;align-items:center}
+.adinkra-card .adinkra-symbol{background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px}
+.adinkra-meta h3{margin:0 0 2px;font-size:16px}
+.adinkra-meta .meaning{color:var(--muted);font-size:13px}
+.adinkra-meta .motto{color:var(--gold);font-style:italic;font-size:13px;margin-top:4px}
+.progress{height:8px;background:#ece8df;border-radius:6px;overflow:hidden;margin-top:6px}
+.progress > span{display:block;height:100%;background:var(--green)}
+.progress.over > span{background:var(--red)}
+.pill-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.pill-row a{background:#fff;border:1px solid var(--line);padding:7px 14px;border-radius:20px;font-size:13px}
+.pill-row a.active{background:var(--navy);color:#fff}
+.lock-tag{color:var(--muted);font-size:12px}
+.hint{color:var(--muted);font-size:12.5px}
+.kpi-mini{font-size:12px;color:var(--muted)}
+.symbol-cell{display:flex;align-items:center;gap:10px}
+"""
+
+JS = """
+document.addEventListener('change', function(e){
+  var el = e.target;
+  if(el && el.matches('[data-quarter-source]')){
+    var box = document.getElementById('quarterBox');
+    if(box){
+      var m = parseInt(el.value,10);
+      var q = Math.floor((m-1)/3)+1;
+      var names=['January','February','March','April','May','June','July','August','September','October','November','December'];
+      var qm=[(q-1)*3, (q-1)*3+1, (q-1)*3+2].map(function(i){return names[i];}).join(', ');
+      box.querySelector('strong').textContent = 'Q'+q;
+      var qmEl = box.querySelector('.q-months');
+      if(qmEl) qmEl.textContent = '('+qm+')';
+      box.setAttribute('data-q', q);
+      var hidden = document.querySelector('input[name=quarter_auto]');
+      if(hidden) hidden.value = q;
+    }
+  }
+});
+document.addEventListener('submit', function(e){
+  var f=e.target;
+  if(f.matches('[data-confirm]') && !window.confirm(f.getAttribute('data-confirm'))){
+    e.preventDefault();
+  }
+});
+"""

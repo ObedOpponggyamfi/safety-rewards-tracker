@@ -1,0 +1,17 @@
+# Runtime data store (reseeded on first run)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS / tooling
+.vscode/
+.idea/
+.claude/
+.omc/
+.DS_Store
+Thumbs.db

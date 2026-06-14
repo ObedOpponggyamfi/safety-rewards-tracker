@@ -63,6 +63,7 @@ DEMO_MODE = True
 PERMISSIONS = [
     "hid_request.create", "hid_request.view_own", "hid.create_for_employee", "hid.verify",
     "hid.approve", "hid.reject", "points.process_automatic", "points.adjust_authorised",
+    "points.adjust_request", "points.adjust_approve", "notification.view_own",
     "incident.create", "incident.edit", "incident.approve", "audit.create",
     "investigation.create", "investigation.approve", "action.assign", "action.update_assigned",
     "action.verify", "lti.reset", "reward.view_eligibility", "reward.request",
@@ -71,7 +72,8 @@ PERMISSIONS = [
     "report.view_department", "report.view_company", "hse.module", "user.manage", "role.manage",
 ]
 
-_EARN = {"reward.view_eligibility", "reward.request", "hid_request.create", "hid_request.view_own"}
+_BASE = {"notification.view_own"}
+_EARN = _BASE | {"reward.view_eligibility", "reward.request", "hid_request.create", "hid_request.view_own"}
 _HSE_CREATE = {"incident.create", "incident.edit", "audit.create", "investigation.create",
                "action.assign", "action.update_assigned", "action.verify", "hid.verify",
                "report.view_department", "hse.module"}
@@ -81,15 +83,16 @@ ROLE_PERMISSIONS = {
     "worker": set(_EARN),
     "champion": _EARN | {"hid.create_for_employee", "report.view_department"},
     "supervisor": _EARN | {"hid.verify", "action.update_assigned", "report.view_department", "hse.module"},
-    "hse_officer": set(_HSE_CREATE),
+    "hse_officer": _BASE | set(_HSE_CREATE) | {"points.adjust_request"},
     "hse_manager": _HSE_CREATE | {"hid.approve", "hid.reject", "incident.approve",
         "investigation.approve", "points.process_automatic", "points.adjust_authorised",
-        "lti.reset", "report.view_company"},
+        "points.adjust_request", "points.adjust_approve", "lti.reset", "report.view_company",
+        "notification.view_own"},
     "finance_manager": {"reward.finance_approve", "reward.finance_reject", "reward.release",
-        "reward.defer", "reward.budget_hold", "budget.view"},
+        "reward.defer", "reward.budget_hold", "budget.view", "notification.view_own"},
     "management": {"report.view_department", "report.view_company", "budget.view",
-        "budget.create", "budget.approve", "hse.module"},
-    "admin": {"user.manage", "role.manage"},
+        "budget.create", "budget.approve", "hse.module", "notification.view_own"},
+    "admin": {"user.manage", "role.manage", "notification.view_own"},
 }
 
 NAV_ITEMS = [
@@ -97,6 +100,8 @@ NAV_ITEMS = [
      "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 10},
     {"group": "Overview", "label": "Upgrade to Pro", "route": "/pro", "icon": "lock",
      "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 90},
+    {"group": "Overview", "label": "Notifications", "route": "/notifications", "icon": "bell",
+     "required_permission": "notification.view_own", "allowed_roles": ROLE_ORDER, "display_order": 80},
 
     {"group": "Worker", "label": "Submit HID Request", "route": "/hid/request", "icon": "plus",
      "required_permission": "hid_request.create", "allowed_roles": ["worker", "champion"], "display_order": 10},
@@ -109,6 +114,8 @@ NAV_ITEMS = [
 
     {"group": "Champion", "label": "Champion Dashboard", "route": "/champion", "icon": "shield",
      "required_permission": "hid.create_for_employee", "allowed_roles": ["champion"], "display_order": 10},
+    {"group": "Champion", "label": "Employee Search", "route": "/champion/employees", "icon": "search",
+     "required_permission": "hid.create_for_employee", "allowed_roles": ["champion"], "display_order": 15},
     {"group": "Champion", "label": "Pending Verification", "route": "/champion/hid-requests", "icon": "clipboard",
      "required_permission": "hid.create_for_employee", "allowed_roles": ["champion"], "display_order": 20},
     {"group": "Champion", "label": "Create HID for Employee", "route": "/report/hid", "icon": "edit",
@@ -121,6 +128,8 @@ NAV_ITEMS = [
 
     {"group": "HSE", "label": "HID Review and Approval", "route": "/review", "icon": "check-circle",
      "required_permission": "hid.approve", "allowed_roles": ["hse_manager"], "display_order": 10},
+    {"group": "HSE", "label": "Point Adjustments", "route": "/points/adjustments", "icon": "plus-minus",
+     "required_permission": "points.adjust_request", "allowed_roles": ["hse_officer", "hse_manager"], "display_order": 15},
     {"group": "HSE", "label": "Safety Observations", "route": "/report/observation", "icon": "eye",
      "required_permission": "hse.module", "allowed_roles": ["hse_officer", "hse_manager"], "display_order": 20},
     {"group": "HSE", "label": "Near Miss / HID", "route": "/report/hid", "icon": "alert",
@@ -264,10 +273,78 @@ MONTHS = [
 # --------------------------------------------------------------------------
 PLAN = "Free"
 FREE_LIMITS = {
-    "company": 1, "site": 1, "locations": 5, "departments": 2,
-    "contractors": 3, "employees": 50, "champions": 2,
+    "company": 1, "site": 1, "locations": 5, "departments": 11,
+    "contractors": 33, "employees": 700, "champions": 55, "champions_per_dept": 5,
     "records_per_month": 100, "history_days": 90,
 }
+
+INVALID_CONTRACTOR_NAMES = {"not stated", "n/a", "asanko"}
+
+OFFICIAL_DEPARTMENTS = [
+    {"id": 1, "key": "mining", "department": "Mining", "employee_count": 70},
+    {"id": 2, "key": "technical_services", "department": "Technical Services", "employee_count": 15},
+    {"id": 3, "key": "processing", "department": "Processing", "employee_count": 230},
+    {"id": 4, "key": "exploration", "department": "Exploration", "employee_count": 20},
+    {"id": 5, "key": "environment_sustainability", "department": "Environment & Sustainability", "employee_count": 30},
+    {"id": 6, "key": "ohs", "department": "Occupational Health & Safety", "employee_count": 18},
+    {"id": 7, "key": "asset_protection", "department": "Asset Protection", "employee_count": 30},
+    {"id": 8, "key": "finance_supply_chain", "department": "Finance and Supply Chain", "employee_count": 30},
+    {"id": 9, "key": "organizational_capability", "department": "Organizational Capability", "employee_count": 20},
+    {"id": 10, "key": "external_relations_social_responsibility", "department": "External Relations & Social Responsibility", "employee_count": 20},
+    {"id": 11, "key": "site_management", "department": "Site Management", "employee_count": 10},
+]
+
+OLD_DEPARTMENT_KEY_MAP = {
+    "adinkrahene": "mining",
+    "nyansapo": "processing",
+    "fihankra": "ohs",
+    "akoben": "asset_protection",
+    "eban": "site_management",
+    "sankofa": "organizational_capability",
+    "nkonsonkonson": "finance_supply_chain",
+    "dwennimmen": "technical_services",
+}
+
+CONTRACTOR_INCIDENT_HISTORY = {
+    "PW", "THONKET", "NAFHAS", "KPS", "Kanu Equipment", "Mobi Crane",
+    "RABOTEC", "KASLIVE", "ROCKSURE", "G5",
+}
+
+CONTRACTOR_MASTER_SEED = [
+    ("AEL", "AEL", "Blasting services", "mining", 8),
+    ("DRA", "DRA", "Engineering projects", "technical_services", 12),
+    ("AKL", "AKL", "Civil works", "mining", 5),
+    ("Andy Best", "ANDY", "Transport services", "site_management", 7),
+    ("Ariester", "ARIE", "Construction support", "site_management", 6),
+    ("Bavad", "BAV", "Facilities services", "environment_sustainability", 5),
+    ("BLOJ", "BLOJ", "Logistics support", "finance_supply_chain", 4),
+    ("COFKANS", "COF", "Camp and catering services", "organizational_capability", 5),
+    ("DMA", "DMA", "Exploration drilling", "exploration", 8),
+    ("Erduk", "ERD", "Maintenance services", "processing", 6),
+    ("Esjef", "ESJ", "Maintenance services", "processing", 5),
+    ("G5", "G5", "Security services", "asset_protection", 12),
+    ("GEOGRILL", "GEO", "Exploration drilling", "exploration", 8),
+    ("Kanu Equipment", "KANU", "Equipment support", "mining", 14),
+    ("Kapmoh", "KAP", "Civil works", "site_management", 5),
+    ("KASLIVE", "KAS", "Transport services", "mining", 10),
+    ("KPS", "KPS", "Processing support", "processing", 12),
+    ("Mobi Crane", "MOBI", "Lifting operations", "technical_services", 9),
+    ("MODU", "MODU", "Site services", "site_management", 6),
+    ("MOORE ENGINEERING", "MOORE", "Engineering support", "technical_services", 8),
+    ("NAFHAS", "NAF", "Transport services", "mining", 12),
+    ("Oman GH", "OMGH", "Civil works", "site_management", 6),
+    ("Omanbapa", "OMAN", "Civil works", "site_management", 6),
+    ("PW", "PW", "Mining contractor", "mining", 18),
+    ("PX EQUIPMENT", "PX", "Equipment support", "mining", 8),
+    ("RABOTEC", "RAB", "Processing maintenance", "processing", 12),
+    ("RIEEMY2K", "RIE", "Labour support", "organizational_capability", 7),
+    ("ROCKSURE", "ROCK", "Mining contractor", "mining", 16),
+    ("SAHARA", "SAH", "Fuel and lubricants", "finance_supply_chain", 6),
+    ("SOLAR NITRO", "SOL", "Blasting services", "mining", 7),
+    ("THONKET", "THO", "Haulage services", "mining", 12),
+    ("WTS", "WTS", "Water treatment services", "environment_sustainability", 6),
+    ("ZEN", "ZEN", "Supply services", "finance_supply_chain", 5),
+]
 
 # Advanced capabilities reserved for paid tiers (rendered as locked cards).
 PRO_FEATURES = [
@@ -490,6 +567,387 @@ def hotspot_status(total, th=None):
     return "Normal"
 
 
+def _norm_text(value):
+    return str(value or "").strip().casefold()
+
+
+def _contractor_name_is_valid(name):
+    return _norm_text(name) not in INVALID_CONTRACTOR_NAMES
+
+
+def official_department_rows():
+    """Official Safety Pays department master with attached Adinkra identity."""
+    symbols = adinkra.DEPARTMENTS
+    rows = []
+    for meta in OFFICIAL_DEPARTMENTS:
+        symbol = symbols[(meta["id"] - 1) % len(symbols)]
+        rows.append({
+            "id": meta["id"],
+            "key": meta["key"],
+            "adinkra_name": symbol["adinkra_name"],
+            "department": meta["department"],
+            "meaning": symbol["meaning"],
+            "motto": symbol["motto"],
+            "commons_file": symbol["commons_file"],
+            "employee_count": meta["employee_count"],
+            "active_employees": meta["employee_count"],
+            "official_headcount": meta["employee_count"],
+        })
+    return rows
+
+
+def official_contractor_rows():
+    rows = []
+    for idx, (name, code, category, dept_key, workforce) in enumerate(CONTRACTOR_MASTER_SEED, start=1):
+        has_history = name in CONTRACTOR_INCIDENT_HISTORY
+        start_month = ((idx - 1) % 12) + 1
+        rows.append({
+            "id": idx,
+            "name": name,
+            "contractor_id": idx,
+            "contractor_name": name,
+            "contractor_code": code,
+            "service_category": category,
+            "responsible_department": dept_key,
+            "contract_start_date": date(2024, start_month, 1).isoformat(),
+            "contract_end_date": date(2027, start_month, 28).isoformat(),
+            "active_workforce_count": workforce,
+            "contract_owner": "%s Manager" % dept_master_name(dept_key),
+            "status": "Active",
+            "has_historical_incidents": has_history,
+            "incident_count": (idx % 4 + 1) if has_history else 0,
+            "notes": "Historical incidents on record." if has_history else "",
+        })
+    return rows
+
+
+def dept_master_name(key):
+    meta = next((d for d in OFFICIAL_DEPARTMENTS if d["key"] == key), None)
+    return meta["department"] if meta else key
+
+
+def department_key_from_value(value, db=None, default=None):
+    val = str(value or "").strip()
+    if not val:
+        return default
+    low = val.casefold()
+    if low in OLD_DEPARTMENT_KEY_MAP:
+        return OLD_DEPARTMENT_KEY_MAP[low]
+    rows = (db or DB).get("departments", []) if isinstance(db or DB, dict) else []
+    official = {d["key"]: d for d in official_department_rows()}
+    for key in official:
+        if low == key.casefold():
+            return key
+    for d in list(rows) + list(official.values()):
+        choices = [d.get("key"), d.get("department"), d.get("adinkra_name"), str(d.get("id", ""))]
+        if any(low == str(choice or "").strip().casefold() for choice in choices):
+            return d.get("key")
+    return default
+
+
+def valid_contractors(db=None):
+    source = (db or DB).get("companies", []) if isinstance(db or DB, dict) else []
+    rows = []
+    for c in source:
+        name = c.get("contractor_name") or c.get("name")
+        if _contractor_name_is_valid(name):
+            rows.append(c)
+    return rows
+
+
+def contractor_id_from_value(value, db=None, default=None):
+    val = str(value or "").strip()
+    if not val:
+        return default
+    low = val.casefold()
+    for c in valid_contractors(db):
+        choices = [
+            c.get("id"), c.get("contractor_id"), c.get("contractor_name"),
+            c.get("name"), c.get("contractor_code"),
+        ]
+        if any(low == str(choice or "").strip().casefold() for choice in choices):
+            return c.get("id") or c.get("contractor_id")
+    return default
+
+
+def employee_by_employee_id(employee_id, db=None):
+    low = _norm_text(employee_id)
+    if not low:
+        return None
+    for u in (db or DB).get("users", []):
+        if _norm_text(u.get("employee_id")) == low:
+            return u
+    return None
+
+
+def employee_display_id(u):
+    return u.get("employee_id") or ("#%s" % u.get("id", ""))
+
+
+def next_employee_id(prefix="EMP", db=None):
+    source = db or DB
+    prefix = (prefix or "EMP").upper()
+    seen = {_norm_text(u.get("employee_id")) for u in source.get("users", []) if u.get("employee_id")}
+    n = 1
+    for u in source.get("users", []):
+        eid = str(u.get("employee_id") or "")
+        if eid.upper().startswith(prefix):
+            try:
+                n = max(n, int(eid[len(prefix):]) + 1)
+            except ValueError:
+                continue
+    return _unique_employee_id(prefix, seen, n)
+
+
+def _unique_employee_id(prefix, seen, seed_number=1):
+    n = max(1, int(seed_number or 1))
+    while True:
+        candidate = "%s%05d" % (prefix, n)
+        low = candidate.casefold()
+        if low not in seen:
+            seen.add(low)
+            return candidate
+        n += 1
+
+
+def _user_template(uid, name, role, title, dept_key, company_id=None,
+                   is_contractor=False, active=True, roles=None, employee_id=None):
+    employment_type = "Contractor" if is_contractor else "Internal"
+    status = "Active" if active else "Inactive"
+    return {
+        "id": uid,
+        "employee_id": employee_id or ("%s%05d" % ("CTR" if is_contractor else "EMP", uid)),
+        "full_name": name,
+        "name": name,
+        "employment_type": employment_type,
+        "department_id": dept_key,
+        "dept_key": dept_key,
+        "contractor_id": company_id if is_contractor else None,
+        "company_id": company_id if is_contractor else None,
+        "job_title": title,
+        "title": title,
+        "supervisor_id": None,
+        "safety_champion_id": None,
+        "shift": "Day",
+        "site": "Asanko Gold Mine",
+        "email": "",
+        "phone": "",
+        "status": status,
+        "role": role,
+        "roles": roles or [role],
+        "is_contractor": is_contractor,
+        "active": active,
+        "is_champion": bool(roles and "champion" in roles) or role == "champion",
+    }
+
+
+def _assign_department_support(db):
+    """Populate supervisor/champion links inside each department."""
+    for dept in db.get("departments", []):
+        dept_key = dept["key"]
+        supervisor = next((u for u in db.get("users", [])
+                           if u.get("dept_key") == dept_key and has_role(u, "supervisor")), None)
+        champion = next((u for u in db.get("users", [])
+                         if u.get("dept_key") == dept_key and has_role(u, "champion")), None)
+        for u in db.get("users", []):
+            if u.get("dept_key") != dept_key:
+                continue
+            if supervisor and u.get("id") != supervisor.get("id") and not u.get("supervisor_id"):
+                u["supervisor_id"] = supervisor["id"]
+            if champion and u.get("id") != champion.get("id") and not u.get("safety_champion_id"):
+                u["safety_champion_id"] = champion["id"]
+
+
+def _refresh_department_counts(db):
+    for dept in db.get("departments", []):
+        official = next((d for d in OFFICIAL_DEPARTMENTS if d["key"] == dept["key"]), None)
+        if official:
+            dept["employee_count"] = official["employee_count"]
+            dept["official_headcount"] = official["employee_count"]
+        active_internal = sum(
+            1 for u in db.get("users", [])
+            if u.get("dept_key") == dept["key"] and not u.get("is_contractor")
+            and u.get("active", True)
+        )
+        dept["active_employees"] = max(active_internal, min(dept.get("employee_count", 0), active_internal))
+
+
+def _migrate_department_keys(db):
+    changed = False
+
+    def mapped(value):
+        new_key = department_key_from_value(value, db=db, default=value)
+        return new_key or value
+
+    collections = (
+        "users", "safety_observations", "near_miss_hazard_reports", "incidents",
+        "corrective_actions", "safety_points", "point_reset_events", "reward_requests",
+        "property_damage", "worker_hid_requests", "department_access",
+    )
+    for coll in collections:
+        for rec in db.get(coll, []):
+            for field in ("dept_key", "department_id"):
+                if field in rec:
+                    new_key = mapped(rec.get(field))
+                    if rec.get(field) != new_key:
+                        rec[field] = new_key
+                        changed = True
+    return changed
+
+
+def _ensure_master_data(db):
+    changed = False
+    if _migrate_department_keys(db):
+        changed = True
+    wanted_depts = official_department_rows()
+    if db.get("departments") != wanted_depts:
+        db["departments"] = wanted_depts
+        changed = True
+    wanted_companies = official_contractor_rows()
+    current_names = {_norm_text(c.get("contractor_name") or c.get("name")) for c in db.get("companies", [])}
+    current_names -= INVALID_CONTRACTOR_NAMES
+    wanted_names = {_norm_text(c["contractor_name"]) for c in wanted_companies}
+    if current_names != wanted_names or len(db.get("companies", [])) != len(wanted_companies):
+        db["companies"] = wanted_companies
+        changed = True
+    else:
+        by_name = {_norm_text(c.get("contractor_name") or c.get("name")): c for c in db.get("companies", [])}
+        merged = []
+        for row in wanted_companies:
+            old = by_name.get(_norm_text(row["contractor_name"]), {})
+            merged_row = dict(row)
+            for field in ("contract_start_date", "contract_end_date", "active_workforce_count",
+                          "contract_owner", "status", "incident_count", "notes"):
+                if old.get(field) not in (None, ""):
+                    merged_row[field] = old[field]
+            merged.append(merged_row)
+        if db.get("companies") != merged:
+            db["companies"] = merged
+            changed = True
+    return changed
+
+
+def _normalise_employee_fields(db):
+    changed = False
+    seen = set()
+    official_default = db["departments"][0]["key"] if db.get("departments") else "mining"
+    first_contractor = valid_contractors(db)[0]["id"] if valid_contractors(db) else None
+    for u in db.get("users", []):
+        dept_key = department_key_from_value(u.get("dept_key") or u.get("department_id"), db=db, default=official_default)
+        if u.get("dept_key") != dept_key:
+            u["dept_key"] = dept_key
+            changed = True
+        if u.get("department_id") != dept_key:
+            u["department_id"] = dept_key
+            changed = True
+        is_contractor = bool(u.get("is_contractor") or u.get("employment_type") == "Contractor"
+                             or u.get("company_id") or u.get("contractor_id"))
+        contractor_id = contractor_id_from_value(u.get("contractor_id") or u.get("company_id"), db=db)
+        if is_contractor and contractor_id is None:
+            contractor_id = first_contractor
+        if not is_contractor:
+            contractor_id = None
+        pairs = {
+            "name": u.get("name") or u.get("full_name") or "Employee %s" % u.get("id", ""),
+            "full_name": u.get("full_name") or u.get("name") or "Employee %s" % u.get("id", ""),
+            "title": u.get("title") or u.get("job_title") or role_label(u.get("role", "worker")),
+            "job_title": u.get("job_title") or u.get("title") or role_label(u.get("role", "worker")),
+            "employment_type": "Contractor" if is_contractor else "Internal",
+            "contractor_id": contractor_id,
+            "company_id": contractor_id,
+            "is_contractor": is_contractor,
+            "active": bool(u.get("active", u.get("status", "Active") != "Inactive")),
+            "status": "Active" if u.get("active", u.get("status", "Active") != "Inactive") else "Inactive",
+            "shift": u.get("shift") or "Day",
+            "site": u.get("site") or "Asanko Gold Mine",
+            "email": u.get("email") or "",
+            "phone": u.get("phone") or "",
+            "supervisor_id": u.get("supervisor_id"),
+            "safety_champion_id": u.get("safety_champion_id"),
+        }
+        for key, value in pairs.items():
+            if u.get(key) != value:
+                u[key] = value
+                changed = True
+        eid = str(u.get("employee_id") or "").strip()
+        if not eid or eid.casefold() in seen:
+            eid = _unique_employee_id("CTR" if is_contractor else "EMP", seen, u.get("id", 1))
+            u["employee_id"] = eid
+            changed = True
+        else:
+            seen.add(eid.casefold())
+        if u.get("role") == "champion":
+            roles = user_roles(u)
+            if "worker" not in roles:
+                roles.insert(0, "worker")
+                u["roles"] = roles
+                changed = True
+    _assign_department_support(db)
+    _refresh_department_counts(db)
+    return changed
+
+
+def _ensure_workforce_size(db):
+    """Guarantee the company demo can carry a 700+ worker population."""
+    changed = False
+    rng = random.Random(20260614)
+    first_names = ["Kwame", "Ama", "Kofi", "Akua", "Yaw", "Abena", "Kojo", "Adwoa",
+                   "Kwabena", "Akosua", "Kwaku", "Afia", "Yaa", "Fiifi", "Esi",
+                   "Nana", "Kwadwo", "Maa", "Kweku", "Adjoa"]
+    last_names = ["Mensah", "Owusu", "Boateng", "Asante", "Agyeman", "Darko",
+                  "Appiah", "Osei", "Annan", "Frimpong", "Tetteh", "Quartey",
+                  "Addo", "Bediako", "Gyamfi"]
+    job_titles = ["Operator", "Technician", "Safety Steward", "Artisan", "Field Assistant",
+                  "Controller", "Maintainer", "Officer", "Assistant", "Coordinator"]
+    shifts = ["Day", "Night", "A", "B"]
+    seen = {_norm_text(u.get("employee_id")) for u in db.get("users", []) if u.get("employee_id")}
+    next_uid = max([u.get("id", 0) for u in db.get("users", [])] or [0]) + 1
+
+    def make_name(serial):
+        return "%s %s" % (first_names[serial % len(first_names)], last_names[(serial * 3) % len(last_names)])
+
+    def add_user(role, title, dept_key, company_id=None, is_contractor=False, roles=None):
+        nonlocal next_uid, changed
+        prefix = "CTR" if is_contractor else "EMP"
+        employee_id = _unique_employee_id(prefix, seen, next_uid)
+        u = _user_template(next_uid, make_name(next_uid), role, title, dept_key,
+                           company_id=company_id, is_contractor=is_contractor,
+                           roles=roles or [role], employee_id=employee_id)
+        u["shift"] = rng.choice(shifts)
+        u["email"] = "%s.%s@safetypays.demo" % (u["full_name"].split()[0].lower(), employee_id.lower())
+        u["phone"] = "024%07d" % (1000000 + next_uid)
+        db["users"].append(u)
+        next_uid += 1
+        changed = True
+        return u
+
+    for dept in db.get("departments", []):
+        dept_key = dept["key"]
+        if not any(u.get("dept_key") == dept_key and has_role(u, "champion") for u in db.get("users", [])):
+            add_user("champion", "Department Safety Champion", dept_key, roles=["worker", "champion"])
+        if not any(u.get("dept_key") == dept_key and has_role(u, "supervisor") for u in db.get("users", [])):
+            add_user("supervisor", "Supervisor", dept_key, roles=["supervisor"])
+        target = dept.get("official_headcount") or dept.get("employee_count", 0)
+        internal_count = sum(1 for u in db.get("users", [])
+                             if u.get("dept_key") == dept_key and not u.get("is_contractor"))
+        while internal_count < target:
+            add_user("worker", rng.choice(job_titles), dept_key, roles=["worker"])
+            internal_count += 1
+
+    for company in valid_contractors(db):
+        target = int(company.get("active_workforce_count") or 0)
+        dept_key = department_key_from_value(company.get("responsible_department"), db=db, default="mining")
+        current = sum(1 for u in db.get("users", []) if u.get("company_id") == company["id"])
+        while current < target:
+            add_user("worker", "Contractor Worker", dept_key, company_id=company["id"],
+                     is_contractor=True, roles=["worker"])
+            current += 1
+
+    _assign_department_support(db)
+    _refresh_department_counts(db)
+    return changed
+
+
 # --------------------------------------------------------------------------
 # Load / save
 # --------------------------------------------------------------------------
@@ -552,11 +1010,44 @@ def record_audit(user, action, module, record_id=None, old_value=None, new_value
     })
 
 
+def notify(user_id, title, message, link="", kind="info"):
+    """Create an in-app notification for one user."""
+    if not user_id:
+        return None
+    DB.setdefault("notifications", [])
+    nid = next_id("notifications")
+    note = {
+        "id": nid,
+        "user_id": user_id,
+        "ts": now_iso(),
+        "title": title,
+        "message": message,
+        "link": link,
+        "kind": kind,
+        "read": False,
+    }
+    DB["notifications"].append(note)
+    return note
+
+
+def notify_role(role, title, message, link="", kind="info", dept_key=None):
+    sent = []
+    for u in DB.get("users", []):
+        if not has_role(u, role):
+            continue
+        if dept_key and u.get("dept_key") != dept_key:
+            continue
+        sent.append(notify(u["id"], title, message, link, kind))
+    return sent
+
+
 def ensure_schema(db):
     """Bring older JSON stores up to the current RBAC/workflow shape."""
     changed = False
     defaults = {
         "worker_hid_requests": [],
+        "notifications": [],
+        "point_adjustment_requests": [],
         "audit_logs": [],
         "roles": [],
         "permissions": [],
@@ -575,17 +1066,16 @@ def ensure_schema(db):
     if "demo_mode" not in db["settings"]:
         db["settings"]["demo_mode"] = DEMO_MODE
         changed = True
+    if _ensure_master_data(db):
+        changed = True
 
     next_uid = (max([u.get("id", 0) for u in db.get("users", [])] or [0]) + 1)
 
     def add_user(role, title, dept_key=None):
         nonlocal next_uid, changed
         dept_key = dept_key or (db["departments"][0]["key"] if db.get("departments") else "")
-        user_obj = {
-            "id": next_uid, "name": "Demo %s" % role_label(role),
-            "role": role, "roles": [role], "title": title, "dept_key": dept_key,
-            "company_id": None, "is_contractor": False, "active": True,
-        }
+        user_obj = _user_template(next_uid, "Demo %s" % role_label(role), role, title,
+                                  dept_key, roles=[role])
         db["users"].append(user_obj)
         next_uid += 1
         changed = True
@@ -645,6 +1135,13 @@ def ensure_schema(db):
             rw["cash_value"] = 0
             changed = True
 
+    if _normalise_employee_fields(db):
+        changed = True
+    if _ensure_workforce_size(db):
+        changed = True
+    if _normalise_employee_fields(db):
+        changed = True
+
     role_rows = [{"id": i + 1, "key": role, "label": role_label(role)} for i, role in enumerate(ROLE_ORDER)]
     if db.get("roles") != role_rows:
         db["roles"] = role_rows
@@ -672,6 +1169,8 @@ def ensure_schema(db):
     if _migrate_reward_requests(db):
         changed = True
     if _seed_worker_hid_requests(db):
+        changed = True
+    if _seed_notifications(db):
         changed = True
     return changed
 
@@ -723,6 +1222,23 @@ def _seed_worker_hid_requests(db):
     return True
 
 
+def _seed_notifications(db):
+    if db.get("notifications"):
+        return False
+    for u in db.get("users", [])[:8]:
+        db["notifications"].append({
+            "id": len(db["notifications"]) + 1,
+            "user_id": u["id"],
+            "ts": now_iso(),
+            "title": "Welcome to Safety Pays",
+            "message": "Your sidebar is tailored to your assigned role permissions.",
+            "link": "/",
+            "kind": "info",
+            "read": False,
+        })
+    return bool(db.get("notifications"))
+
+
 # --------------------------------------------------------------------------
 # Seed data
 # --------------------------------------------------------------------------
@@ -744,6 +1260,8 @@ def seed():
         "rewards": [],
         "reward_requests": [],
         "worker_hid_requests": [],
+        "notifications": [],
+        "point_adjustment_requests": [],
         "audit_logs": [],
         "property_damage": [],
         "yearly_reward_budgets": [],
@@ -1033,10 +1551,9 @@ def seed():
         a.setdefault("location", rng.choice(locations))
     lti_inc["lost_days"] = rng.randint(3, 30)
 
-    # ---- SafePay Champions (Free plan allows up to 2) ---------------------
-    champ_pool = [u for u in workers if not u["is_contractor"]]
-    for u in rng.sample(champ_pool, min(FREE_LIMITS["champions"], len(champ_pool))):
-        u["is_champion"] = True
+    # ---- Department Safety Champions -------------------------------------
+    # Champions are assigned deliberately per department by role, not by
+    # random promotion, so department caps remain enforceable.
 
     # ---- Reward requests in the direct Finance workflow -------------------
     # employee request -> system validation/reservation -> finance -> release
@@ -1125,7 +1642,8 @@ def user(uid):
 
 
 def department(key):
-    return next((d for d in DB["departments"] if d["key"] == key), None)
+    norm_key = department_key_from_value(key, db=DB, default=key)
+    return next((d for d in DB["departments"] if d["key"] == norm_key), None)
 
 
 def reward(rid):
@@ -1133,18 +1651,24 @@ def reward(rid):
 
 
 def company(cid):
-    return next((c for c in DB["companies"] if c["id"] == cid), None)
+    wanted = str(cid or "").strip().casefold()
+    for c in DB["companies"]:
+        choices = [c.get("id"), c.get("contractor_id"), c.get("contractor_code"),
+                   c.get("contractor_name"), c.get("name")]
+        if any(wanted == str(choice or "").strip().casefold() for choice in choices):
+            return c
+    return None
 
 
 def dept_name(key):
     d = department(key)
-    return d["adinkra_name"] if d else key
+    return d.get("department") or d.get("adinkra_name") if d else key
 
 
 def dept_department(key):
-    """The real operational department a given Adinkra emblem represents."""
+    """Adinkra identity attached to the operational department."""
     d = department(key)
-    return d.get("department", "") if d else ""
+    return ("Adinkra: %s" % d.get("adinkra_name")) if d and d.get("adinkra_name") else ""
 
 
 def records_in(coll, year, month=None, quarter=None, where=None):

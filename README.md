@@ -40,10 +40,10 @@ file (or use **Admin Tools → Reset demo data**) to reseed a fresh demo.
 Pick any demo user on the sign-in screen — each carries a role:
 
 - **Worker / Employee** — submit HID requests, view own points, request rewards
-- **Department Safety Champion** — convert worker HID requests into official HIDs
+- **Department Safety Champion** — search department employees and convert worker HID requests into official HIDs
 - **Supervisor** — verify department HIDs and assigned corrective actions
 - **HSE Officer** — create and review operational HSE records
-- **HSE Manager** — final HID approval/rejection, automatic point outcomes, reports
+- **HSE Manager** — final HID approval/rejection, automatic point outcomes, manual point-adjustment approval, reports
 - **Finance Approver** — approve, reject, hold, defer and release reward requests
 - **Management** — company reporting and budget setup/approval
 - **System Administrator** — users, roles, departments, champion assignment and settings
@@ -78,6 +78,16 @@ This is enforced both in the navigation and on every budget route.
 - **Incident → LTI reset.** Logging a Lost Time Injury resets the department's
   monthly safety points and records a `point_reset_event` for audit. Reset-aware
   totals power the monthly/quarterly/yearly leaderboards.
+- **Official Safety Pays master data.** The demo now seeds the 11 official
+  departments, a 33-company Contractor Master Register and a 700+ employee
+  workforce structure.
+- **Employee master tools.** Admin Tools support employee search, pagination,
+  department/contractor/status filters, CSV or Excel-pasted imports, duplicate
+  employee-ID validation and bulk department, supervisor and Safety Champion
+  assignment.
+- **Contractor rules.** Internal employees do not require a contractor company;
+  contractor employees do. Invalid placeholder contractor names such as
+  `Not Stated`, `N/A` and `ASANKO` are excluded from contractor options.
 
 ---
 
@@ -129,14 +139,16 @@ restore reserved points.
 - Supervisor review & approval queue
 - Corrective action tracker (create, close, overdue flags)
 - Safety points ledger
+- Manual point-adjustment request and HSE Manager approval workflow
 - Reward catalogue + worker request flow
-- Reward approval workflow: submit → Admin → Finance → release, with rejection reasons
+- Reward approval workflow: submit → system validation → Finance → release, with rejection reasons
 - Individual, contractor and department leaderboards (weekly/monthly/quarterly/yearly)
 - Weekly Rewards (week-in-month)
 - Adinkra Safety Identity & Adinkra League
 - Monthly Reports Centre — auto-generated reports for every module
 - Yearly, monthly and quarterly reward budget controls
 - Department employee-based reward limits
+- In-app notifications for role-specific workflow updates
 - CSV exports that respect the active filters
 
 ---
@@ -181,8 +193,8 @@ an upgrade page at `/pro`.
   consequence is Major/Catastrophic, the risk is Critical, or a reviewer flags it.
 - **Actual vs Potential consequence** on every report (Insignificant → Catastrophic),
   with a "Low actual / high potential" focus card.
-- **Dept & Contractor Summary** (`/summary`) — basic counts (Free shows 2 departments
-  / 3 contractors) plus cause-category charts.
+- **Dept & Contractor Summary** (`/summary`) — basic counts (Free shows 11 departments
+  / 33 contractors) plus cause-category charts.
 - **Cause categories** — one controlled master value each (no duplicate variants).
 - **Property / Equipment Damage** (`/damage`) — damage type, asset, cost range,
   downtime, repair status.
@@ -200,9 +212,9 @@ an upgrade page at `/pro`.
   Forecasting — Pro"**.
 
 **Free limits** (existing data is never deleted when a limit is reached — a clear
-upgrade message is shown instead): 1 company · 1 site · 5 locations · 2 departments ·
-3 contractors · 50 employees · 2 SafePay Champions · 100 records per month ·
-current month + 90 days of detailed history · CSV export only.
+upgrade message is shown instead): 1 company · 1 site · 5 locations · 11 departments ·
+33 contractors · 700 employees · 55 SafePay Champions (5 per department) ·
+100 records per month · current month + 90 days of detailed history · CSV export only.
 
 ---
 
@@ -219,8 +231,9 @@ current month + 90 days of detailed history · CSV export only.
 JSON collections already mirror a future relational schema: `users`,
 `departments`, `companies`, `safety_observations`, `near_miss_hazard_reports`,
 `incidents`, `corrective_actions`, `safety_points`, `point_reset_events`,
-`rewards`, `reward_requests`, `worker_hid_requests`, `roles`, `permissions`,
-`role_permissions`, `user_roles`, `department_access`, `audit_logs`,
+`rewards`, `reward_requests`, `worker_hid_requests`, `notifications`,
+`point_adjustment_requests`, `roles`, `permissions`, `role_permissions`,
+`user_roles`, `department_access`, `audit_logs`,
 `yearly_reward_budgets`, `monthly_reward_budgets`, `quarterly_reward_budgets`.
 
 ---

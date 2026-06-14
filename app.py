@@ -73,6 +73,11 @@ def request_status_badge(status):
     return R.badge(status, kind)
 
 
+def adjustment_status_badge(status):
+    kind = {"approved": "ok", "rejected": "bad", "pending": "warn"}.get(status, "muted")
+    return R.badge(status.replace("_", " ").title(), kind)
+
+
 # --------------------------------------------------------------------------
 # Page bodies
 # --------------------------------------------------------------------------
@@ -210,6 +215,43 @@ def body_dashboard(user, qs):
     return top + personal + todo_html + dept_html + preview
 
 
+def body_notifications(user, qs):
+    status = q1(qs, "status", "all")
+    notes = [n for n in D.DB.get("notifications", []) if n.get("user_id") == user["id"]]
+    if status == "unread":
+        notes = [n for n in notes if not n.get("read")]
+    notes.sort(key=lambda n: n.get("ts", ""), reverse=True)
+    unread = sum(1 for n in D.DB.get("notifications", [])
+                 if n.get("user_id") == user["id"] and not n.get("read"))
+    cards = '<div class="grid cols-3" style="margin-bottom:18px">%s%s%s</div>' % (
+        R.stat_card("Unread", unread),
+        R.stat_card("Total", len([n for n in D.DB.get("notifications", []) if n.get("user_id") == user["id"]])),
+        R.stat_card("Showing", status.title()),
+    )
+    controls = """<form class="filter-bar" method="get">
+        <a class="btn ghost%s" href="/notifications">All</a>
+        <a class="btn ghost%s" href="/notifications?status=unread">Unread</a>
+      </form>""" % (" active" if status == "all" else "", " active" if status == "unread" else "")
+    rows = []
+    for n in notes[:80]:
+        link = '<a class="btn sm ghost" href="%s">Open</a>' % R.esc(n.get("link") or "/") if n.get("link") else "&mdash;"
+        mark = "&mdash;" if n.get("read") else """<form class="inline" method="post" action="/notifications">
+            <input type="hidden" name="action" value="read">
+            <input type="hidden" name="id" value="%d">
+            <button class="btn sm">Mark read</button></form>""" % n["id"]
+        rows.append([D.fmt_date(n.get("ts", "")), R.esc(n.get("title", "")),
+                     R.esc(n.get("message", "")), R.badge("Read" if n.get("read") else "Unread", "muted" if n.get("read") else "warn"),
+                     link, mark])
+    mark_all = ""
+    if unread:
+        mark_all = """<form method="post" action="/notifications">
+            <input type="hidden" name="action" value="read_all">
+            <button class="btn">Mark all read</button></form>"""
+    return cards + controls + R.section("Notifications",
+        R.table(["When", "Title", "Message", "Status", "Link", ""], rows, "No notifications yet."),
+        actions=mark_all)
+
+
 def body_observation_form(user, qs):
     depts = "".join('<option value="%s">%s</option>' % (d["key"], R.esc(d["adinkra_name"])) for d in D.DB["departments"])
     cats = ["Unsafe act", "Unsafe condition", "Good practice", "Housekeeping", "PPE"]
@@ -343,6 +385,61 @@ def body_champion_dashboard(user, qs):
     return R.section("Champion dashboard", cards) + R.section(
         "Recent department HID requests",
         R.table(["Date", "Employee", "Summary", "Location", "Status"], rows, "No employee requests."))
+
+
+def body_champion_employee_search(user, qs):
+    q = (q1(qs, "q") or "").strip()
+    contractor = q1(qs, "contractor") or ""
+    status = q1(qs, "status") or "Active"
+    page_no = qint(qs, "page", 1) or 1
+    page_size = min(max(qint(qs, "page_size", 25) or 25, 10), 100)
+    employees = [u for u in D.DB["users"]
+                 if D.has_role(u, "worker") and u.get("dept_key") == user.get("dept_key")]
+    if q:
+        needle = q.lower()
+        employees = [e for e in employees
+                     if needle in e["name"].lower()
+                     or needle in str(e.get("employee_id", "")).lower()
+                     or needle == str(e["id"])
+                     or needle in (e.get("title", "").lower())]
+    if contractor:
+        cid = D.contractor_id_from_value(contractor)
+        employees = [e for e in employees if e.get("company_id") == cid]
+    if status:
+        employees = [e for e in employees if e.get("status", "Active") == status]
+    employees.sort(key=lambda e: e["name"])
+    contractor_ids = sorted({e.get("company_id") for e in employees if e.get("company_id")})
+    contractor_items = [(cid, _contractor_label(cid)) for cid in contractor_ids]
+    base_params = {"q": q, "contractor": contractor, "status": status, "page_size": page_size}
+    page_no, pages, pager = _pagination(len(employees), page_no, page_size, base_params, path="/champion/employees")
+    start = (page_no - 1) * page_size
+    shown = employees[start:start + page_size]
+    controls = """<form class="filter-bar" method="get">
+        <div class="field"><label>Employee search</label><input name="q" value="%s" placeholder="name, employee id or title"></div>
+        <div class="field"><label>Contractor</label><select name="contractor">%s</select></div>
+        <div class="field"><label>Status</label><select name="status">%s</select></div>
+        <div class="field"><label>Page size</label><select name="page_size">%s</select></div>
+        <button class="btn">Search</button>
+        <a class="btn ghost" href="/champion/employees">Reset</a>
+      </form>""" % (
+        R.esc(q1(qs, "q") or ""),
+        _opts(contractor_items, contractor, "All contractors"),
+        _opts([("Active", "Active"), ("Inactive", "Inactive")], status, "All"),
+        _opts([(10, "10"), (25, "25"), (50, "50"), (100, "100")], page_size, ""),
+    )
+    rows = []
+    for e in shown:
+        open_requests = len([r for r in D.DB.get("worker_hid_requests", [])
+                             if r.get("employee_id") == e["id"] and r.get("request_status") not in ("Approved", "Rejected", "Closed")])
+        create = '<a class="btn sm gold" href="/report/hid?employee_id=%d">Create HID</a>' % e["id"]
+        contractor_name = R.esc(_contractor_label(e.get("company_id"))) if e.get("is_contractor") else "-"
+        rows.append([R.esc(D.employee_display_id(e)), R.esc(e["name"]), R.esc(e.get("title", "")),
+                     R.dept_label_html(e.get("dept_key")), contractor_name, _status_badge(e.get("status", "Active")),
+                     "%d pts" % D.lifetime_points(e["id"]), "%d" % open_requests, create])
+    hint = '<p class="hint">Champions can search and select employees only inside their assigned department.</p>'
+    return hint + controls + R.section("Employee Search",
+        R.table(["Employee ID", "Name", "Title", "Department", "Contractor", "Status", "Lifetime points", "Open HID requests", ""],
+                rows, "No employees found.") + pager)
 
 
 def body_champion_hid_requests(user, qs):
@@ -483,6 +580,80 @@ def body_actions(user, qs):
               R.esc(a["description"]), D.fmt_date(a.get("closed_ts") or a["ts"])] for a in closed]
     closed_tbl = R.table(["Department", "Owner", "Action", "Closed"], crows, "No closed actions yet.")
     return create + R.section("Open corrective actions", open_tbl) + R.section("Recently closed", closed_tbl)
+
+
+def _adjustment_visible_users(user):
+    users = [u for u in D.DB["users"] if D.has_role(u, "worker") and u.get("active", True)]
+    if not D.has_perm(user, "report.view_company"):
+        users = [u for u in users if u.get("dept_key") == user.get("dept_key")]
+    users.sort(key=lambda u: u["name"])
+    return users
+
+
+def body_point_adjustments(user, qs):
+    can_request = D.has_perm(user, "points.adjust_request")
+    can_approve = D.has_perm(user, "points.adjust_approve")
+    users = _adjustment_visible_users(user)
+    form = ""
+    if can_request:
+        opts = "".join('<option value="%d">%s</option>' % (
+            u["id"], R.esc("%s - %s" % (u["name"], D.dept_name(u.get("dept_key"))))) for u in users)
+        form = R.section("Request manual point adjustment", """<form method="post" action="/points/adjustments" class="card form-card">
+          <input type="hidden" name="action" value="request">
+          <div class="row-inline">
+            <div class="field"><label>Employee</label><select name="user_id" required>%s</select></div>
+            <div class="field"><label>Points (+/-)</label><input name="points" type="number" required></div>
+          </div>
+          <div class="field"><label>Mandatory reason</label><textarea name="reason" required></textarea></div>
+          <div class="field"><label>Supporting reference</label><input name="supporting_reference" placeholder="report id, investigation ref, email ref" required></div>
+          <button class="btn gold">Submit for HSE Manager approval</button>
+        </form>""" % opts)
+
+    pending = [a for a in D.DB.get("point_adjustment_requests", []) if a.get("status") == "pending"]
+    if not D.has_perm(user, "report.view_company"):
+        pending = [a for a in pending if a.get("dept_key") == user.get("dept_key")]
+    pending.sort(key=lambda a: a.get("ts", ""))
+    prows = []
+    for a in pending:
+        target = D.user(a["user_id"])
+        requester = D.user(a["requested_by"])
+        action = "&mdash;"
+        if can_approve and a.get("requested_by") != user["id"]:
+            action = """<form class="inline" method="post" action="/points/adjustments">
+                <input type="hidden" name="action" value="approve">
+                <input type="hidden" name="id" value="%d">
+                <button class="btn ok sm">Approve</button></form>
+              <form class="inline" method="post" action="/points/adjustments">
+                <input type="hidden" name="action" value="reject">
+                <input type="hidden" name="id" value="%d">
+                <input name="decision_reason" placeholder="Rejection reason" style="width:150px;display:inline-block">
+                <button class="btn bad sm">Reject</button></form>""" % (a["id"], a["id"])
+        elif can_approve:
+            action = '<span class="hint">Self-approval blocked</span>'
+        prows.append([D.fmt_date(a["ts"]), R.esc(target["name"] if target else "?"),
+                      R.dept_label_html(a.get("dept_key")), "<strong>%+d</strong>" % a["points"],
+                      R.esc(requester["name"] if requester else "?"), R.esc(a["reason"]),
+                      R.esc(a["supporting_reference"]), action])
+    approvals = ""
+    if can_approve:
+        approvals = R.section("Pending HSE Manager approval",
+            R.table(["Requested", "Employee", "Department", "Points", "Requester", "Reason", "Reference", "Decision"],
+                    prows, "No pending manual point adjustments."))
+
+    mine = [a for a in D.DB.get("point_adjustment_requests", [])
+            if a.get("requested_by") == user["id"] or (can_approve and D.can_access_department(user, a.get("dept_key")))]
+    mine.sort(key=lambda a: a.get("ts", ""), reverse=True)
+    rows = []
+    for a in mine[:80]:
+        target = D.user(a["user_id"])
+        rows.append([D.fmt_date(a["ts"]), R.esc(target["name"] if target else "?"),
+                     R.dept_label_html(a.get("dept_key")), "%+d" % a["points"],
+                     adjustment_status_badge(a.get("status", "pending")),
+                     R.esc(a.get("decision_reason") or a.get("reason", ""))])
+    history = R.section("Adjustment history",
+        R.table(["Date", "Employee", "Department", "Points", "Status", "Reason / decision"],
+                rows, "No point adjustment requests yet."))
+    return form + approvals + history
 
 
 def body_points(user, qs):
@@ -1075,7 +1246,103 @@ def body_budgets(user, qs):
     return note + yearly + monthly + quarterly + dept_tbl + creator
 
 
-def body_admin(user, qs):
+def _contractor_label(contractor_id):
+    c = D.company(contractor_id)
+    if not c:
+        return ""
+    return c.get("contractor_name") or c.get("name") or ""
+
+
+def _employee_label(user_id):
+    u = D.user(user_id)
+    if not u:
+        return ""
+    return "%s - %s" % (D.employee_display_id(u), u.get("name", ""))
+
+
+def _parse_employee_tokens(text):
+    raw = (text or "").replace(";", ",").replace("\r", "\n")
+    tokens = []
+    for part in raw.replace(",", "\n").split("\n"):
+        part = part.strip()
+        if part:
+            tokens.append(part)
+    return tokens
+
+
+def _employee_by_token(token):
+    token = str(token or "").strip()
+    if not token:
+        return None
+    emp = D.employee_by_employee_id(token)
+    if emp:
+        return emp
+    try:
+        return D.user(int(token.lstrip("#")))
+    except ValueError:
+        return None
+
+
+def _status_badge(status):
+    return R.badge(status or "Active", "ok" if status != "Inactive" else "muted")
+
+
+def _employee_matches_filters(u, q="", dept="", contractor="", employment="", status=""):
+    if q:
+        hay = " ".join(str(x or "") for x in (
+            u.get("employee_id"), u.get("name"), u.get("full_name"), u.get("title"),
+            u.get("job_title"), u.get("email"), u.get("phone"), u.get("id"),
+        )).lower()
+        if q.lower() not in hay:
+            return False
+    if dept and u.get("dept_key") != dept:
+        return False
+    if contractor:
+        cid = D.contractor_id_from_value(contractor)
+        if u.get("company_id") != cid:
+            return False
+    if employment and u.get("employment_type") != employment:
+        return False
+    if status and u.get("status", "Active") != status:
+        return False
+    return True
+
+
+def _pagination(total, page_no, page_size, base_params, path="/admin"):
+    pages = max(1, (total + page_size - 1) // page_size)
+    page_no = max(1, min(page_no, pages))
+    params_prev = dict(base_params, page=page_no - 1)
+    params_next = dict(base_params, page=page_no + 1)
+    prev_link = '<a class="btn sm ghost" href="%s?%s">Previous</a>' % (path, urlencode(params_prev)) if page_no > 1 else ""
+    next_link = '<a class="btn sm ghost" href="%s?%s">Next</a>' % (path, urlencode(params_next)) if page_no < pages else ""
+    return page_no, pages, '<div class="row-inline" style="justify-content:flex-end">%s<span class="hint">Page %d of %d</span>%s</div>' % (
+        prev_link, page_no, pages, next_link)
+
+
+def _employee_csv_rows(text):
+    text = (text or "").strip()
+    if not text:
+        return []
+    sample = text[:2048]
+    delimiter = "\t" if sample.count("\t") > sample.count(",") else ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    rows = []
+    for idx, row in enumerate(reader, start=2):
+        clean = {str(k or "").strip().lower(): str(v or "").strip() for k, v in row.items()}
+        clean["_line"] = idx
+        rows.append(clean)
+    return rows
+
+
+def _employee_field(row, *names):
+    for name in names:
+        val = row.get(name)
+        if val not in (None, ""):
+            return val
+    return ""
+
+
+def body_admin_legacy(user, qs):
     can_roles = D.has_perm(user, "role.manage")
     dept_opts_plain = "".join('<option value="%s">%s</option>' % (d["key"], R.esc(d["adinkra_name"])) for d in D.DB["departments"])
 
@@ -1202,6 +1469,226 @@ def _opts(items, cur, blank):
 
 def _dept_opts(selected=None):
     return _opts([(d["key"], "%s — %s" % (d["adinkra_name"], d.get("department", ""))) for d in D.DB["departments"]],
+                 selected, "All departments")
+
+
+def body_admin(user, qs):
+    can_roles = D.has_perm(user, "role.manage")
+    dept_items = [(d["key"], D.dept_name(d["key"])) for d in D.DB["departments"]]
+    contractor_items = [(c["id"], c.get("contractor_name") or c.get("name")) for c in D.valid_contractors()]
+    dept_opts_plain = "".join('<option value="%s">%s</option>' % (d["key"], R.esc(D.dept_name(d["key"]))) for d in D.DB["departments"])
+
+    role_opts = "".join('<option value="%s">%s</option>' % (r, R.esc(D.role_label(r))) for r in D.ROLE_ORDER)
+    create = R.section("Create employee", """<form method="post" action="/admin" class="card form-card">
+        <input type="hidden" name="action" value="create_user">
+        <div class="row-inline">
+          <div class="field"><label>Full name</label><input name="name" required></div>
+          <div class="field"><label>Employee ID</label><input name="employee_id" placeholder="auto if blank"></div>
+          <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
+          <div class="field"><label>Employment type</label><select name="employment_type"><option>Internal</option><option>Contractor</option></select></div>
+        </div>
+        <div class="row-inline">
+          <div class="field"><label>Contractor company</label><select name="contractor_id">%s</select></div>
+          <div class="field"><label>Job title</label><input name="job_title" placeholder="Worker"></div>
+          <div class="field"><label>Initial role</label><select name="role">%s</select></div>
+        </div>
+        <button class="btn gold">Create employee</button>
+      </form>""" % (dept_opts_plain, _opts(contractor_items, "", "None / internal"), role_opts)) if can_roles else ""
+
+    q = (q1(qs, "q") or "").strip()
+    dept = D.department_key_from_value(q1(qs, "dept") or "", default="") or ""
+    contractor = q1(qs, "contractor") or ""
+    employment = q1(qs, "employment") or ""
+    status = q1(qs, "status") or ""
+    page_no = qint(qs, "page", 1) or 1
+    page_size = min(max(qint(qs, "page_size", 25) or 25, 10), 100)
+    employees = [u for u in D.DB["users"] if _employee_matches_filters(u, q, dept, contractor, employment, status)]
+    employees.sort(key=lambda u: (D.dept_name(u.get("dept_key")), u.get("name", "")))
+    total_employees = len(employees)
+    base_params = {"q": q, "dept": dept, "contractor": contractor, "employment": employment,
+                   "status": status, "page_size": page_size}
+    page_no, pages, pager = _pagination(total_employees, page_no, page_size, base_params)
+    start = (page_no - 1) * page_size
+    shown_employees = employees[start:start + page_size]
+
+    cards = '<div class="grid cols-4">%s%s%s%s</div>' % (
+        R.stat_card("Workforce", len(D.DB["users"])),
+        R.stat_card("Active", sum(1 for u in D.DB["users"] if u.get("active", True))),
+        R.stat_card("Contractors", sum(1 for u in D.DB["users"] if u.get("is_contractor"))),
+        R.stat_card("Departments", len(D.DB["departments"])),
+    )
+    filters = """<form class="filter-bar" method="get">
+        <div class="field"><label>Employee search</label><input name="q" value="%s" placeholder="name, ID, title, email"></div>
+        <div class="field"><label>Department</label><select name="dept">%s</select></div>
+        <div class="field"><label>Contractor</label><select name="contractor">%s</select></div>
+        <div class="field"><label>Employment</label><select name="employment">%s</select></div>
+        <div class="field"><label>Status</label><select name="status">%s</select></div>
+        <div class="field"><label>Page size</label><select name="page_size">%s</select></div>
+        <button class="btn">Apply</button>
+        <a class="btn ghost" href="/admin">Reset</a></form>""" % (
+        R.esc(q), _opts(dept_items, dept, "All departments"),
+        _opts(contractor_items, contractor, "All contractors"),
+        _opts([("Internal", "Internal"), ("Contractor", "Contractor")], employment, "All"),
+        _opts([("Active", "Active"), ("Inactive", "Inactive")], status, "All"),
+        _opts([(10, "10"), (25, "25"), (50, "50"), (100, "100")], page_size, ""))
+    erows = []
+    for u in shown_employees:
+        sup = _employee_label(u.get("supervisor_id")) or "-"
+        champ = _employee_label(u.get("safety_champion_id")) or "-"
+        contractor_name = R.esc(_contractor_label(u.get("company_id"))) if u.get("is_contractor") else "-"
+        erows.append([
+            R.esc(D.employee_display_id(u)),
+            R.esc(u.get("name", "")),
+            R.badge(u.get("employment_type", "Internal"), "muted"),
+            R.dept_label_html(u.get("dept_key")),
+            contractor_name,
+            R.esc(u.get("job_title") or u.get("title", "")),
+            R.esc(sup),
+            R.esc(champ),
+            _status_badge(u.get("status", "Active")),
+        ])
+    employee_table = R.table(
+        ["Employee ID", "Name", "Type", "Department", "Contractor", "Job title", "Supervisor", "Safety Champion", "Status"],
+        erows, "No employees match the current filters.")
+
+    supervisors = [(u["id"], "%s - %s" % (D.employee_display_id(u), u["name"]))
+                   for u in D.DB["users"] if D.has_role(u, "supervisor")]
+    champions = [(u["id"], "%s - %s" % (D.employee_display_id(u), u["name"]))
+                 for u in D.DB["users"] if D.has_role(u, "champion")]
+    bulk = """<form method="post" action="/admin" class="card form-card">
+        <input type="hidden" name="action" value="bulk_assign_employees">
+        <div class="field"><label>Employee IDs</label><textarea name="employee_ids" placeholder="EMP00012, EMP00044 or one per line" required></textarea></div>
+        <div class="row-inline">
+          <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
+          <div class="field"><label>Supervisor</label><select name="supervisor_id">%s</select></div>
+          <div class="field"><label>Safety Champion</label><select name="safety_champion_id">%s</select></div>
+          <div class="field"><label>Status</label><select name="status">%s</select></div>
+        </div>
+        <button class="btn">Apply bulk assignment</button>
+      </form>""" % (
+        _opts(dept_items, "", "No change"),
+        _opts(supervisors, "", "No change"),
+        _opts(champions, "", "No change"),
+        _opts([("Active", "Active"), ("Inactive", "Inactive")], "", "No change"),
+    )
+    import_form = """<form method="post" action="/admin" class="card form-card">
+        <input type="hidden" name="action" value="import_employees">
+        <div class="field"><label>CSV or Excel rows</label><textarea name="csv_text" style="min-height:160px" placeholder="employee_id,full_name,employment_type,department_id,contractor_id,job_title,supervisor_id,safety_champion_id,shift,site,email,phone,status"></textarea></div>
+        <button class="btn gold">Import employees</button>
+      </form>"""
+    employee_master = R.section("Employee Master",
+        cards + filters + '<p class="hint">Showing %d of %d matching employees.</p>' % (len(shown_employees), total_employees)
+        + employee_table + pager + '<div class="grid cols-2">%s%s</div>' % (bulk, import_form))
+
+    contractor_rows = []
+    for c in D.valid_contractors():
+        history = R.badge("Yes (%s)" % c.get("incident_count", 0), "warn") if c.get("has_historical_incidents") else R.badge("No", "muted")
+        contractor_rows.append([
+            R.esc(c.get("contractor_id")),
+            R.esc(c.get("contractor_name") or c.get("name")),
+            R.esc(c.get("contractor_code", "")),
+            R.esc(c.get("service_category", "")),
+            R.esc(D.dept_name(c.get("responsible_department"))),
+            R.esc("%s to %s" % (c.get("contract_start_date", ""), c.get("contract_end_date", ""))),
+            R.esc(c.get("active_workforce_count", 0)),
+            R.esc(c.get("contract_owner", "")),
+            _status_badge(c.get("status", "Active")),
+            history,
+            R.esc(c.get("notes", "")),
+        ])
+    contractor_master = R.section("Contractor Master Register", R.table(
+        ["ID", "Contractor", "Code", "Service", "Responsible department", "Contract dates",
+         "Workforce", "Owner", "Status", "Historical incidents", "Notes"], contractor_rows))
+
+    user_q = (q1(qs, "user_q") or "").strip().lower()
+    rolef = q1(qs, "rolef") or ""
+    users = D.DB["users"]
+    if user_q:
+        users = [u for u in users if user_q in u["name"].lower() or user_q == str(u["id"])
+                 or user_q == str(u.get("employee_id", "")).lower()]
+    if rolef:
+        users = [u for u in users if D.has_role(u, rolef)]
+    if not user_q and not rolef:
+        users = [u for u in users if D.user_roles(u) != ["worker"]]
+    total_matches = len(users)
+    shown = users[:12]
+    search = """<form class="filter-bar" method="get">
+        <div class="field"><label>Search user</label><input name="user_q" value="%s" placeholder="name or id"></div>
+        <div class="field"><label>Filter role</label><select name="rolef">%s</select></div>
+        <button class="btn">Search</button>
+        <a class="btn ghost" href="/admin">Reset</a></form>""" % (
+        R.esc(q1(qs, "user_q") or ""), _opts([(r, D.role_label(r)) for r in D.ROLE_ORDER], rolef, "All roles"))
+    urows = []
+    for u in shown:
+        roles = D.user_roles(u)
+        checks = ""
+        for r in D.ROLE_ORDER:
+            ck = " checked" if r in roles else ""
+            checks += ('<label style="display:inline-block;margin:0 8px 4px 0;font-size:12px;font-weight:500">'
+                       '<input type="checkbox" name="role_%s" value="1"%s style="width:auto;margin-right:3px">%s</label>'
+                       % (r, ck, R.esc(D.role_label(r))))
+        form = ("""<form method="post" action="/admin">
+            <input type="hidden" name="action" value="set_roles"><input type="hidden" name="user_id" value="%d">
+            %s<button class="btn sm">Save roles</button></form>""" % (u["id"], checks)) if can_roles else R.esc(", ".join(D.role_label(r) for r in roles))
+        urows.append([R.esc(D.employee_display_id(u)), R.esc(u["name"]), R.esc(D.dept_name(u.get("dept_key"))), form])
+    more = ('<p class="hint">Showing %d of %d matching users - use search to find others.</p>'
+            % (len(shown), total_matches)) if total_matches > len(shown) else ""
+    users_tbl = R.section("User & role management",
+        search + R.table(["Employee ID", "User", "Department", "Roles (tick to assign, then Save)"], urows,
+                         "No matching users.") + more)
+
+    crows = []
+    for d in D.DB["departments"]:
+        champs = [u for u in D.DB["users"] if D.has_role(u, "champion") and u.get("dept_key") == d["key"]]
+        cand = [u for u in D.DB["users"] if u.get("dept_key") == d["key"] and not D.has_role(u, "champion")]
+        cand_opts = "".join('<option value="%d">%s</option>' % (u["id"], R.esc("%s - %s" % (D.employee_display_id(u), u["name"]))) for u in cand)
+        champ_chips = ""
+        for c in champs:
+            champ_chips += ('<form class="inline" method="post" action="/admin"><input type="hidden" name="action" value="remove_champion">'
+                            '<input type="hidden" name="user_id" value="%d"><span class="badge badge-ok">%s</span>'
+                            '<button class="btn sm bad" title="Remove">&times;</button></form> ' % (c["id"], R.esc(c["name"])))
+        add = ""
+        if can_roles and len(champs) < D.FREE_LIMITS.get("champions_per_dept", 5):
+            add = ('<form class="inline" method="post" action="/admin"><input type="hidden" name="action" value="assign_champion">'
+                   '<input type="hidden" name="dept_key" value="%s"><select name="user_id">%s</select>'
+                   '<button class="btn sm">Add champion</button></form>' % (d["key"], cand_opts))
+        elif can_roles:
+            add = '<span class="hint">Max 5 reached.</span>'
+        crows.append([R.esc(D.dept_name(d["key"])), "%d / 5" % len(champs), (champ_chips or "-") + " " + add])
+    champ_tbl = R.section("Department Safety Champion assignment",
+        R.table(["Department", "Champions", "Manage (max 5 per department)"], crows))
+
+    dept_rows = ""
+    for d in D.DB["departments"]:
+        dept_rows += """<form class="inline" method="post" action="/admin" style="display:block;margin-bottom:8px">
+            <input type="hidden" name="action" value="set_employees"><input type="hidden" name="dept_key" value="%s">
+            <span style="display:inline-block;width:260px"><strong>%s</strong> <span class="kpi-mini">%s</span></span>
+            Active <input name="active" type="number" min="0" value="%d" style="width:90px;display:inline-block">
+            of <input name="total" type="number" min="0" value="%d" style="width:90px;display:inline-block">
+            <button class="btn sm">Update limit</button>
+            <span class="hint">limit = %s</span>
+          </form>""" % (d["key"], R.esc(D.dept_name(d["key"])), R.esc(d.get("adinkra_name", "")),
+                        d["active_employees"], d["employee_count"], D.fmt_money(D.dept_monthly_limit(d)))
+    emp = R.section("Department employees -> reward limits", '<div class="card">%s</div>' % dept_rows)
+
+    logs = list(reversed(D.DB.get("audit_logs", [])))[:12]
+    lrows = [[D.fmt_date(a.get("timestamp", "")), "#%s" % a.get("user_id"), R.esc(a.get("user_role", "")),
+              R.esc(a.get("action", "")), R.esc(a.get("module", "")), R.esc(str(a.get("record_id", "")))]
+             for a in logs]
+    audit = R.section("Audit logs (most recent)",
+        R.table(["When", "User", "Role(s)", "Action", "Module", "Record"], lrows, "No audit entries yet."))
+
+    reset = R.section("Demo data", """<div class="card">
+        <p>Reseed the demo from scratch (clears the runtime JSON store).</p>
+        <form method="post" action="/admin" data-confirm="Reset all demo data?">
+          <input type="hidden" name="action" value="reset_demo">
+          <button class="btn bad">Reset &amp; reseed demo data</button></form></div>""")
+
+    return create + employee_master + contractor_master + users_tbl + champ_tbl + emp + audit + reset
+
+
+def _dept_opts(selected=None):
+    return _opts([(d["key"], D.dept_name(d["key"])) for d in D.DB["departments"]],
                  selected, "All departments")
 
 
@@ -1671,6 +2158,109 @@ def _limit_msg():
             "upgrade to Pro for unlimited records." % D.FREE_LIMITS["records_per_month"])
 
 
+def post_notifications(user, form):
+    action = q1(form, "action")
+    if action == "read_all":
+        for n in D.DB.get("notifications", []):
+            if n.get("user_id") == user["id"]:
+                n["read"] = True
+        D.save()
+        return redirect("/notifications", "All notifications marked read.")
+    if action == "read":
+        note = next((n for n in D.DB.get("notifications", [])
+                     if n["id"] == qint(form, "id") and n.get("user_id") == user["id"]), None)
+        if note:
+            note["read"] = True
+            D.save()
+        return redirect("/notifications")
+    return redirect("/notifications")
+
+
+def post_point_adjustments(user, form):
+    action = q1(form, "action")
+    if action == "request":
+        if not D.has_perm(user, "points.adjust_request"):
+            return redirect("/points/adjustments", ACCESS_DENIED)
+        target = D.user(qint(form, "user_id"))
+        if not target or not D.has_role(target, "worker"):
+            return redirect("/points/adjustments", "Employee not found.")
+        if not D.can_access_department(user, target.get("dept_key")):
+            return redirect("/points/adjustments", ACCESS_DENIED)
+        points = qint(form, "points", 0)
+        if points == 0:
+            return redirect("/points/adjustments", "Point adjustment cannot be zero.")
+        reason = (q1(form, "reason") or "").strip()
+        supporting_reference = (q1(form, "supporting_reference") or "").strip()
+        if not reason or not supporting_reference:
+            return redirect("/points/adjustments", "Reason and supporting reference are required.")
+        aid = D.next_id("point_adjustment_requests")
+        req = {
+            "id": aid, "ts": D.now_iso(), "requested_by": user["id"],
+            "user_id": target["id"], "dept_key": target.get("dept_key"),
+            "points": points, "reason": reason, "supporting_reference": supporting_reference,
+            "status": "pending", "approved_by": None, "approved_ts": None,
+            "decision_reason": None, "safety_point_id": None,
+        }
+        D.DB.setdefault("point_adjustment_requests", []).append(req)
+        D.record_audit(user, "point_adjustment.request", "point_adjustment_requests", aid,
+                       None, {"user_id": target["id"], "points": points})
+        D.notify(target["id"], "Point adjustment requested",
+                 "%+d points requested for review: %s" % (points, reason),
+                 "/points", "points")
+        D.notify_role("hse_manager", "Point adjustment awaiting approval",
+                      "%s requested %+d points for %s." % (user["name"], points, target["name"]),
+                      "/points/adjustments", "approval")
+        D.save()
+        return redirect("/points/adjustments", "Point adjustment submitted for HSE Manager approval.")
+
+    req = next((a for a in D.DB.get("point_adjustment_requests", []) if a["id"] == qint(form, "id")), None)
+    if not req:
+        return redirect("/points/adjustments", "Adjustment request not found.")
+    if not D.has_perm(user, "points.adjust_approve"):
+        return redirect("/points/adjustments", ACCESS_DENIED)
+    if req.get("requested_by") == user["id"]:
+        return redirect("/points/adjustments", "Self-approval is not allowed.")
+    if req.get("status") != "pending":
+        return redirect("/points/adjustments", "That request has already been decided.")
+    if action == "approve":
+        target = D.user(req["user_id"])
+        spid = D.next_id("safety_points")
+        D.DB["safety_points"].append({
+            "id": spid, "ts": D.now_iso(), "user_id": req["user_id"],
+            "dept_key": req["dept_key"], "points": req["points"],
+            "reason": "Manual adjustment: %s" % req["reason"],
+            "source_type": "manual_adjustment", "source_id": req["id"],
+        })
+        req["status"] = "approved"
+        req["approved_by"] = user["id"]
+        req["approved_ts"] = D.now_iso()
+        req["safety_point_id"] = spid
+        D.record_audit(user, "point_adjustment.approve", "point_adjustment_requests", req["id"],
+                       {"status": "pending"}, {"status": "approved", "safety_point_id": spid})
+        D.notify(req["user_id"], "Point adjustment approved",
+                 "%+d points were applied to your ledger." % req["points"],
+                 "/points", "points")
+        D.notify(req["requested_by"], "Point adjustment approved",
+                 "Your request for %s was approved." % (target["name"] if target else "the employee"),
+                 "/points/adjustments", "approval")
+        D.save()
+        return redirect("/points/adjustments", "Point adjustment approved and posted to the ledger.")
+    if action == "reject":
+        reason = (q1(form, "decision_reason") or "").strip() or "No reason provided."
+        req["status"] = "rejected"
+        req["approved_by"] = user["id"]
+        req["approved_ts"] = D.now_iso()
+        req["decision_reason"] = reason
+        D.record_audit(user, "point_adjustment.reject", "point_adjustment_requests", req["id"],
+                       {"status": "pending"}, {"status": "rejected", "reason": reason})
+        D.notify(req["requested_by"], "Point adjustment rejected",
+                 "Your manual point adjustment request was rejected: %s" % reason,
+                 "/points/adjustments", "approval")
+        D.save()
+        return redirect("/points/adjustments", "Point adjustment rejected.")
+    return redirect("/points/adjustments")
+
+
 def post_observation(user, form):
     if D.at_record_limit():
         return redirect("/report/observation", _limit_msg())
@@ -1711,6 +2301,13 @@ def post_hid_request(user, form):
     })
     D.record_audit(user, "hid_request.create", "worker_hid_requests", rid,
                    None, {"status": "Assigned to Champion" if champ else "Submitted"})
+    if champ:
+        D.notify(champ["id"], "New HID request assigned",
+                 "%s submitted a HID request for champion review." % user["name"],
+                 "/champion/hid-requests", "hid")
+    D.notify(user["id"], "HID request submitted",
+             "Your HID request has been sent to your Department Safety Champion.",
+             "/hid/requests", "hid")
     D.save()
     return redirect("/hid/requests", "HID request submitted to your Department Safety Champion.")
 
@@ -1750,6 +2347,12 @@ def post_champion_hid_requests(user, form):
     req["champion_id"] = user["id"]
     D.record_audit(user, "hid.convert", "near_miss_hazard_reports", hid_id,
                    {"worker_hid_request": req["id"]}, {"status": "submitted"})
+    D.notify(req["employee_id"], "HID request converted",
+             "Your Department Safety Champion converted your request to an official HID.",
+             "/hid/requests", "hid")
+    D.notify_role("supervisor", "HID awaiting verification",
+                  "%s submitted an official HID for verification." % user["name"],
+                  "/review", "hid", dept_key=user.get("dept_key"))
     D.save()
     return redirect("/champion/hid-requests", "Employee HID request converted to an official HID.")
 
@@ -1783,6 +2386,12 @@ def post_hid(user, form):
         req["converted_to_hid_id"] = h["id"]
     D.record_audit(user, "hid.create", "near_miss_hazard_reports", h["id"],
                    None, {"submitted_for_user_id": submitted_for, "status": "submitted"})
+    D.notify(submitted_for, "Official HID submitted",
+             "An official HID was submitted for you and is awaiting verification.",
+             "/hid/requests", "hid")
+    D.notify_role("supervisor", "HID awaiting verification",
+                  "An official HID is awaiting supervisor verification.",
+                  "/review", "hid", dept_key=h["dept_key"])
     D.save()
     msg = "Official HID submitted for supervisor verification."
     if warnings and not h.get("dq_override"):
@@ -1838,6 +2447,9 @@ def post_review(user, form):
             h["status"] = "verified"
             D.record_audit(user, "hid.verify", "near_miss_hazard_reports", h["id"],
                            {"status": "submitted"}, {"status": "verified"})
+            D.notify_role("hse_manager", "HID awaiting HSE approval",
+                          "A supervisor verified an HID for final HSE decision.",
+                          "/review", "hid")
             D.save()
             return redirect("/review", "HID verified and sent to HSE.")
         if action == "approve":
@@ -1858,6 +2470,9 @@ def post_review(user, form):
                            {"hse_approval_status": "pending"}, {"hse_approval_status": "approved"})
             D.record_audit(user, "point_award", "safety_points", h["id"],
                            None, {"user_id": target_user_id, "points": D.POINTS["hid"]})
+            D.notify(target_user_id, "HID approved",
+                     "%d safety points were awarded automatically." % D.POINTS["hid"],
+                     "/points", "points")
             D.save()
             return redirect("/review", "HID approved. %d points awarded automatically." % D.POINTS["hid"])
         if action == "reject":
@@ -1873,6 +2488,9 @@ def post_review(user, form):
                 req["request_status"] = "Rejected"
             D.record_audit(user, "hid.reject", "near_miss_hazard_reports", h["id"],
                            {"hse_approval_status": "pending"}, {"reason": h["hse_rejection_reason"]})
+            D.notify(h.get("submitted_for_user_id") or h.get("reporter_id"), "HID rejected",
+                     "HSE rejected the HID: %s" % h["hse_rejection_reason"],
+                     "/hid/requests", "hid")
             D.save()
             return redirect("/review", "HID rejected. No points awarded.")
         if action == "violation":
@@ -1886,6 +2504,9 @@ def post_review(user, form):
             h["violation_recorded"] = True
             D.record_audit(user, "point_deduction", "safety_points", h["id"],
                            None, {"user_id": target_user_id, "points": -D.VIOLATION_PENALTY})
+            D.notify(target_user_id, "Safety points deducted",
+                     "%d points were deducted after HSE confirmed a violation." % D.VIOLATION_PENALTY,
+                     "/points", "points")
             D.save()
             return redirect("/review", "Violation confirmed. %d points deducted." % D.VIOLATION_PENALTY)
         return redirect("/review", "No change.")
@@ -1970,6 +2591,13 @@ def post_reward_request(user, form):
     D.DB["reward_requests"].append(request)
     D.record_audit(user, "reward.request", "reward_requests", request["id"],
                    None, {"status": request["status"], "reserved_points": 0 if auto else rw["point_cost"]})
+    D.notify(user["id"], "Reward request submitted" if not auto else "Reward released",
+             "Your reward request is %s." % ("awaiting Finance approval" if not auto else "released automatically"),
+             "/rewards", "reward")
+    if not auto:
+        D.notify_role("finance_manager", "Reward awaiting Finance approval",
+                      "%s requested %s." % (user["name"], rw["name"]),
+                      "/rewards/releases", "reward")
     D.save()
     if auto:
         return redirect("/rewards", "Reward released automatically and points deducted.")
@@ -2095,6 +2723,67 @@ def _champion_count(dept_key):
 CHAMPIONS_PER_DEPT = 5
 
 
+def _set_status_fields(u, status):
+    status = "Inactive" if status == "Inactive" else "Active"
+    u["status"] = status
+    u["active"] = status == "Active"
+
+
+def _apply_employee_profile(u, name, employment_type, dept_key, contractor_id, job_title,
+                            employee_id=None, supervisor_id=None, safety_champion_id=None,
+                            shift="", site="", email="", phone="", status="Active"):
+    is_contractor = employment_type == "Contractor"
+    u["employee_id"] = employee_id or u.get("employee_id")
+    u["full_name"] = name
+    u["name"] = name
+    u["employment_type"] = employment_type
+    u["department_id"] = dept_key
+    u["dept_key"] = dept_key
+    u["contractor_id"] = contractor_id if is_contractor else None
+    u["company_id"] = contractor_id if is_contractor else None
+    u["job_title"] = job_title
+    u["title"] = job_title
+    u["supervisor_id"] = supervisor_id
+    u["safety_champion_id"] = safety_champion_id
+    u["shift"] = shift or u.get("shift") or "Day"
+    u["site"] = site or u.get("site") or "Asanko Gold Mine"
+    u["email"] = email or u.get("email") or ""
+    u["phone"] = phone or u.get("phone") or ""
+    u["is_contractor"] = is_contractor
+    _set_status_fields(u, status)
+
+
+def _employee_import_payload(row):
+    employee_id = _employee_field(row, "employee_id", "employee id", "id")
+    name = _employee_field(row, "full_name", "full name", "name", "employee_name", "employee name")
+    employment_type = (_employee_field(row, "employment_type", "employment type", "type") or "Internal").title()
+    if employment_type not in ("Internal", "Contractor"):
+        employment_type = "Contractor" if "contract" in employment_type.lower() else "Internal"
+    dept_value = _employee_field(row, "department_id", "department", "department_key", "dept_key", "dept")
+    dept_key = D.department_key_from_value(dept_value, default="")
+    contractor_value = _employee_field(row, "contractor_id", "contractor", "contractor_company", "contractor_name", "company")
+    contractor_id = D.contractor_id_from_value(contractor_value)
+    job_title = _employee_field(row, "job_title", "job title", "title") or "Worker"
+    supervisor = _employee_by_token(_employee_field(row, "supervisor_id", "supervisor", "supervisor employee id"))
+    champion = _employee_by_token(_employee_field(row, "safety_champion_id", "safety champion", "champion"))
+    return {
+        "employee_id": employee_id,
+        "name": name,
+        "employment_type": employment_type,
+        "dept_key": dept_key,
+        "contractor_id": contractor_id,
+        "job_title": job_title,
+        "supervisor_id": supervisor["id"] if supervisor else None,
+        "safety_champion_id": champion["id"] if champion else None,
+        "shift": _employee_field(row, "shift"),
+        "site": _employee_field(row, "site") or "Asanko Gold Mine",
+        "email": _employee_field(row, "email"),
+        "phone": _employee_field(row, "phone"),
+        "status": _employee_field(row, "status") or "Active",
+        "line": row.get("_line", "?"),
+    }
+
+
 def post_admin(user, form):
     if not D.has_perm(user, "user.manage"):
         return redirect("/admin", ACCESS_DENIED)
@@ -2110,6 +2799,111 @@ def post_admin(user, form):
             D.save()
         return redirect("/admin", "Department limit updated.")
 
+    if action == "import_employees":
+        rows = _employee_csv_rows(q1(form, "csv_text") or "")
+        if not rows:
+            return redirect("/admin", "Paste CSV or Excel rows with a header first.")
+        existing_ids = {str(u.get("employee_id", "")).strip().casefold()
+                        for u in D.DB["users"] if u.get("employee_id")}
+        file_ids = set()
+        imported = 0
+        skipped = []
+        for row in rows:
+            payload = _employee_import_payload(row)
+            line = payload["line"]
+            if not payload["name"]:
+                skipped.append("line %s missing name" % line)
+                continue
+            if not payload["dept_key"]:
+                skipped.append("line %s has an unknown department" % line)
+                continue
+            eid = (payload["employee_id"] or "").strip()
+            if eid:
+                low = eid.casefold()
+                if low in existing_ids or low in file_ids:
+                    skipped.append("line %s duplicate employee ID %s" % (line, eid))
+                    continue
+                file_ids.add(low)
+            else:
+                eid = D.next_employee_id("CTR" if payload["employment_type"] == "Contractor" else "EMP")
+            if payload["employment_type"] == "Contractor" and not payload["contractor_id"]:
+                skipped.append("line %s contractor employee needs a contractor company" % line)
+                continue
+            if payload["employment_type"] == "Internal":
+                payload["contractor_id"] = None
+            supervisor = D.user(payload["supervisor_id"])
+            champion = D.user(payload["safety_champion_id"])
+            if supervisor and supervisor.get("dept_key") != payload["dept_key"]:
+                skipped.append("line %s supervisor is outside the department" % line)
+                continue
+            if champion and (not D.has_role(champion, "champion") or champion.get("dept_key") != payload["dept_key"]):
+                skipped.append("line %s safety champion is outside the department" % line)
+                continue
+            uid = D.next_id("users")
+            role = "worker"
+            rec = {"id": uid, "role": role, "roles": [role], "is_champion": False}
+            _apply_employee_profile(
+                rec, payload["name"], payload["employment_type"], payload["dept_key"],
+                payload["contractor_id"], payload["job_title"], employee_id=eid,
+                supervisor_id=payload["supervisor_id"], safety_champion_id=payload["safety_champion_id"],
+                shift=payload["shift"], site=payload["site"], email=payload["email"],
+                phone=payload["phone"], status=payload["status"],
+            )
+            D.DB["users"].append(rec)
+            existing_ids.add(eid.casefold())
+            imported += 1
+        D.ensure_schema(D.DB)
+        D.record_audit(user, "employee.import", "users", None, None, {"imported": imported, "skipped": len(skipped)})
+        D.save()
+        msg = "Imported %d employee(s)." % imported
+        if skipped:
+            msg += " Skipped %d (%s)." % (len(skipped), "; ".join(skipped[:3]))
+        return redirect("/admin", msg)
+
+    if action == "bulk_assign_employees":
+        targets = []
+        missing = []
+        for token in _parse_employee_tokens(q1(form, "employee_ids") or ""):
+            emp = _employee_by_token(token)
+            if emp:
+                targets.append(emp)
+            else:
+                missing.append(token)
+        if not targets:
+            return redirect("/admin", "No matching employees found for bulk assignment.")
+        new_dept = D.department_key_from_value(q1(form, "dept_key") or "", default="") or ""
+        supervisor = D.user(qint(form, "supervisor_id"))
+        champion = D.user(qint(form, "safety_champion_id"))
+        new_status = q1(form, "status") or ""
+        updated = 0
+        skipped = []
+        for emp in targets:
+            dept_key = new_dept or emp.get("dept_key")
+            if new_dept:
+                emp["dept_key"] = dept_key
+                emp["department_id"] = dept_key
+            if supervisor:
+                if supervisor.get("dept_key") != dept_key:
+                    skipped.append(D.employee_display_id(emp))
+                    continue
+                emp["supervisor_id"] = supervisor["id"]
+            if champion:
+                if not D.has_role(champion, "champion") or champion.get("dept_key") != dept_key:
+                    skipped.append(D.employee_display_id(emp))
+                    continue
+                emp["safety_champion_id"] = champion["id"]
+            if new_status:
+                _set_status_fields(emp, new_status)
+            updated += 1
+        D.ensure_schema(D.DB)
+        D.record_audit(user, "employee.bulk_update", "users", None, None,
+                       {"updated": updated, "missing": missing, "skipped": skipped})
+        D.save()
+        msg = "Updated %d employee(s)." % updated
+        if missing or skipped:
+            msg += " Review %d unmatched/mismatched ID(s)." % (len(missing) + len(skipped))
+        return redirect("/admin", msg)
+
     # Role / champion management requires the role.manage permission.
     if action in ("create_user", "set_roles", "assign_champion", "remove_champion"):
         if not D.has_perm(user, "role.manage"):
@@ -2121,12 +2915,33 @@ def post_admin(user, form):
             role = q1(form, "role", "worker")
             if role not in D.ROLE_LABELS:
                 role = "worker"
+            employment_type = q1(form, "employment_type", "Internal")
+            if employment_type not in ("Internal", "Contractor"):
+                employment_type = "Internal"
+            dept_key = D.department_key_from_value(q1(form, "dept_key") or "", default=D.DB["departments"][0]["key"])
+            contractor_id = D.contractor_id_from_value(q1(form, "contractor_id") or "")
+            if employment_type == "Contractor" and not contractor_id:
+                return redirect("/admin", "Contractor employees must have a contractor company.")
+            if employment_type == "Internal":
+                contractor_id = None
+            employee_id = (q1(form, "employee_id") or "").strip()
+            if employee_id and D.employee_by_employee_id(employee_id):
+                return redirect("/admin", "Duplicate employee ID: %s." % employee_id)
+            if not employee_id:
+                employee_id = D.next_employee_id("CTR" if employment_type == "Contractor" else "EMP")
+            if role == "champion" and _champion_count(dept_key) >= CHAMPIONS_PER_DEPT:
+                return redirect("/admin", "That department already has %d Department Safety Champions." % CHAMPIONS_PER_DEPT)
             uid = D.next_id("users")
-            D.DB["users"].append({
-                "id": uid, "name": name, "role": role, "roles": [role], "title": D.role_label(role),
-                "dept_key": q1(form, "dept_key") or D.DB["departments"][0]["key"], "company_id": None,
-                "is_contractor": False, "active": True, "is_champion": role == "champion"})
-            D.record_audit(user, "user.create", "users", uid, None, {"name": name, "roles": [role]})
+            roles = ["worker", "champion"] if role == "champion" else [role]
+            rec = {"id": uid, "role": role, "roles": roles, "is_champion": role == "champion"}
+            _apply_employee_profile(
+                rec, name, employment_type, dept_key, contractor_id,
+                (q1(form, "job_title") or D.role_label(role)).strip(),
+                employee_id=employee_id, status="Active",
+            )
+            D.DB["users"].append(rec)
+            D.ensure_schema(D.DB)
+            D.record_audit(user, "user.create", "users", uid, None, {"name": name, "roles": roles, "employee_id": employee_id})
             D.save()
             return redirect("/admin", "User created: %s (%s)." % (name, D.role_label(role)))
 
@@ -2328,9 +3143,11 @@ def csv_ai(user, qs):
 # --------------------------------------------------------------------------
 GET_ROUTES = {
     "/": ("Dashboard", body_dashboard),
+    "/notifications": ("Notifications", body_notifications),
     "/hid/request": ("Submit HID Request", body_hid_request_form),
     "/hid/requests": ("My HID Requests", body_my_hid_requests),
     "/champion": ("Champion Dashboard", body_champion_dashboard),
+    "/champion/employees": ("Employee Search", body_champion_employee_search),
     "/champion/hid-requests": ("Pending Verification", body_champion_hid_requests),
     "/report/observation": ("Report Observation", body_observation_form),
     "/report/hid": ("Hazard / Near-miss", body_hid_form),
@@ -2338,6 +3155,7 @@ GET_ROUTES = {
     "/review": ("Review Queue", body_review),
     "/actions": ("Corrective Actions", body_actions),
     "/points": ("Points Ledger", body_points),
+    "/points/adjustments": ("Point Adjustments", body_point_adjustments),
     "/rewards": ("Reward Catalogue", body_rewards),
     "/rewards/approvals": ("Reward Approvals", body_reward_approvals),
     "/rewards/releases": ("Finance Approvals", body_reward_finance),
@@ -2357,6 +3175,7 @@ GET_ROUTES = {
     "/ai": ("AI Safety Insights", body_ai),
 }
 POST_ROUTES = {
+    "/notifications": post_notifications,
     "/hid/request": post_hid_request,
     "/champion/hid-requests": post_champion_hid_requests,
     "/report/observation": post_observation,
@@ -2364,6 +3183,7 @@ POST_ROUTES = {
     "/report/incident": post_incident,
     "/review": post_review,
     "/actions": post_actions,
+    "/points/adjustments": post_point_adjustments,
     "/rewards": post_reward_request,
     "/rewards/approvals": post_reward_approval,
     "/rewards/releases": post_reward_finance,
@@ -2382,9 +3202,11 @@ CSV_ROUTES = {
 }
 # Route -> required permission predicate (user -> bool). Absent = any logged-in user.
 ROUTE_GUARDS = {
+    "/notifications": lambda u: D.has_perm(u, "notification.view_own"),
     "/hid/request": lambda u: D.has_perm(u, "hid_request.create"),
     "/hid/requests": lambda u: D.has_perm(u, "hid_request.view_own"),
     "/champion": lambda u: D.has_perm(u, "hid.create_for_employee"),
+    "/champion/employees": lambda u: D.has_perm(u, "hid.create_for_employee"),
     "/champion/hid-requests": lambda u: D.has_perm(u, "hid.create_for_employee"),
     "/report/observation": lambda u: D.has_perm(u, "hse.module"),
     "/report/hid": lambda u: has_any_perm(u, "hid.create_for_employee", "hse.module"),
@@ -2393,6 +3215,7 @@ ROUTE_GUARDS = {
     "/review": lambda u: has_any_perm(u, "hid.verify", "hid.approve", "points.process_automatic"),
     "/actions": lambda u: has_any_perm(u, "action.assign", "action.update_assigned", "action.verify"),
     "/points": lambda u: has_any_perm(u, "reward.view_eligibility", "report.view_department", "report.view_company"),
+    "/points/adjustments": lambda u: has_any_perm(u, "points.adjust_request", "points.adjust_approve"),
     "/rewards": lambda u: has_any_perm(u, "reward.view_eligibility", "reward.finance_approve"),
     "/rewards/approvals": lambda u: False,
     "/rewards/releases": lambda u: has_any_perm(u, "reward.finance_approve", "reward.finance_reject", "reward.release"),

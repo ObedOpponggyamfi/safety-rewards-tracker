@@ -10,6 +10,7 @@ import csv
 import io
 import os
 import secrets
+import socket
 import webbrowser
 from collections import Counter
 from http import cookies
@@ -442,24 +443,6 @@ def body_review(user, qs):
                     rows, "No observations awaiting HSE approval.")))
 
     return "".join(sections) if sections else R.section("Review queue", '<div class="empty">%s</div>' % ACCESS_DENIED)
-
-    pending = [o for o in D.DB["safety_observations"] if o["status"] == "submitted"]
-    pending.sort(key=lambda o: o["ts"])
-    rows = []
-    for o in pending:
-        rep = D.user(o["reporter_id"])
-        actions = ("""<form class="inline" method="post" action="/review">
-            <input type="hidden" name="id" value="%d"><input type="hidden" name="action" value="approve">
-            <button class="btn ok sm">Approve +%d</button></form>
-          <form class="inline" method="post" action="/review">
-            <input type="hidden" name="id" value="%d"><input type="hidden" name="action" value="reject">
-            <button class="btn bad sm">Reject</button></form>"""
-            % (o["id"], D.POINTS["observation"], o["id"]))
-        rows.append([D.fmt_date(o["ts"]), R.esc(rep["name"] if rep else "?"),
-                     R.dept_label_html(o["dept_key"]), R.esc(o["category"]),
-                     R.esc(o["location"]), actions])
-    return R.section("Supervisor review & approval queue",
-                     R.table(["Date", "Reporter", "Department", "Category", "Location", "Decision"], rows, "Queue is clear."))
 
 
 def body_actions(user, qs):
@@ -1093,6 +1076,83 @@ def body_budgets(user, qs):
 
 
 def body_admin(user, qs):
+    can_roles = D.has_perm(user, "role.manage")
+    dept_opts_plain = "".join('<option value="%s">%s</option>' % (d["key"], R.esc(d["adinkra_name"])) for d in D.DB["departments"])
+
+    # 1. Create user --------------------------------------------------------
+    role_opts = "".join('<option value="%s">%s</option>' % (r, R.esc(D.role_label(r))) for r in D.ROLE_ORDER)
+    create = R.section("Create user", """<form method="post" action="/admin" class="card form-card">
+        <input type="hidden" name="action" value="create_user">
+        <div class="row-inline">
+          <div class="field"><label>Full name</label><input name="name" required></div>
+          <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
+          <div class="field"><label>Initial role</label><select name="role">%s</select></div>
+        </div>
+        <button class="btn gold">Create user</button>
+        <p class="hint">New users receive only the role you assign. Approval permissions (HID, incident,
+        reward, finance, investigation) always require an explicit role.</p>
+      </form>""" % (dept_opts_plain, role_opts)) if can_roles else ""
+
+    # 2. User & role management (searchable) --------------------------------
+    q = (q1(qs, "q") or "").strip().lower()
+    rolef = q1(qs, "rolef") or ""
+    users = D.DB["users"]
+    if q:
+        users = [u for u in users if q in u["name"].lower() or q == str(u["id"])]
+    if rolef:
+        users = [u for u in users if D.has_role(u, rolef)]
+    if not q and not rolef:
+        users = [u for u in users if D.user_roles(u) != ["worker"]]  # default: role-holders
+    total_matches = len(users)
+    shown = users[:12]
+    search = """<form class="filter-bar" method="get">
+        <div class="field"><label>Search user</label><input name="q" value="%s" placeholder="name or id"></div>
+        <div class="field"><label>Filter role</label><select name="rolef">%s</select></div>
+        <button class="btn">Search</button>
+        <a class="btn ghost" href="/admin">Reset</a></form>""" % (
+        R.esc(q1(qs, "q") or ""), _opts([(r, D.role_label(r)) for r in D.ROLE_ORDER], rolef, "All roles"))
+    urows = []
+    for u in shown:
+        roles = D.user_roles(u)
+        checks = ""
+        for r in D.ROLE_ORDER:
+            ck = " checked" if r in roles else ""
+            checks += ('<label style="display:inline-block;margin:0 8px 4px 0;font-size:12px;font-weight:500">'
+                       '<input type="checkbox" name="role_%s" value="1"%s style="width:auto;margin-right:3px">%s</label>'
+                       % (r, ck, R.esc(D.role_label(r))))
+        form = ("""<form method="post" action="/admin">
+            <input type="hidden" name="action" value="set_roles"><input type="hidden" name="user_id" value="%d">
+            %s<button class="btn sm">Save roles</button></form>""" % (u["id"], checks)) if can_roles else R.esc(", ".join(D.role_label(r) for r in roles))
+        urows.append(["#%d" % u["id"], R.esc(u["name"]), R.esc(D.dept_name(u.get("dept_key"))), form])
+    more = ('<p class="hint">Showing %d of %d matching users — use search to find others.</p>'
+            % (len(shown), total_matches)) if total_matches > len(shown) else ""
+    users_tbl = R.section("User & role management",
+        search + R.table(["ID", "User", "Department", "Roles (tick to assign, then Save)"], urows,
+                         "No matching users.") + more)
+
+    # 3. Department Safety Champion assignment (max 5 per department) -------
+    crows = []
+    for d in D.DB["departments"]:
+        champs = [u for u in D.DB["users"] if D.has_role(u, "champion") and u.get("dept_key") == d["key"]]
+        cand = [u for u in D.DB["users"] if u.get("dept_key") == d["key"] and not D.has_role(u, "champion")]
+        cand_opts = "".join('<option value="%d">%s</option>' % (u["id"], R.esc(u["name"])) for u in cand)
+        champ_chips = ""
+        for c in champs:
+            champ_chips += ('<form class="inline" method="post" action="/admin"><input type="hidden" name="action" value="remove_champion">'
+                            '<input type="hidden" name="user_id" value="%d"><span class="badge badge-ok">%s</span>'
+                            '<button class="btn sm bad" title="Remove">&times;</button></form> ' % (c["id"], R.esc(c["name"])))
+        add = ""
+        if can_roles and len(champs) < D.FREE_LIMITS.get("champions_per_dept", 5):
+            add = ('<form class="inline" method="post" action="/admin"><input type="hidden" name="action" value="assign_champion">'
+                   '<input type="hidden" name="dept_key" value="%s"><select name="user_id">%s</select>'
+                   '<button class="btn sm">Add champion</button></form>' % (d["key"], cand_opts))
+        elif can_roles:
+            add = '<span class="hint">Max 5 reached.</span>'
+        crows.append([R.esc(d["adinkra_name"]), "%d / 5" % len(champs), (champ_chips or "&mdash;") + " " + add])
+    champ_tbl = R.section("Department Safety Champion assignment",
+        R.table(["Department", "Champions", "Manage (max 5 per department)"], crows))
+
+    # 4. Department employees -> reward limits ------------------------------
     dept_rows = ""
     for d in D.DB["departments"]:
         dept_rows += """<form class="inline" method="post" action="/admin" style="display:block;margin-bottom:8px">
@@ -1103,15 +1163,25 @@ def body_admin(user, qs):
             <button class="btn sm">Update limit</button>
             <span class="hint">limit = %s</span>
           </form>""" % (d["key"], R.esc(d["adinkra_name"]), R.esc(d.get("department", "")),
-                        d["active_employees"], d["employee_count"],
-                        D.fmt_money(D.dept_monthly_limit(d)))
-    emp = R.section("Department employees &rarr; reward limits", '<div class="card">%s</div>' % dept_rows)
+                        d["active_employees"], d["employee_count"], D.fmt_money(D.dept_monthly_limit(d)))
+    emp = R.section("Department employees → reward limits", '<div class="card">%s</div>' % dept_rows)
+
+    # 5. Audit logs ---------------------------------------------------------
+    logs = list(reversed(D.DB.get("audit_logs", [])))[:12]
+    lrows = [[D.fmt_date(a.get("timestamp", "")), "#%s" % a.get("user_id"), R.esc(a.get("user_role", "")),
+              R.esc(a.get("action", "")), R.esc(a.get("module", "")), R.esc(str(a.get("record_id", "")))]
+             for a in logs]
+    audit = R.section("Audit logs (most recent)",
+        R.table(["When", "User", "Role(s)", "Action", "Module", "Record"], lrows, "No audit entries yet."))
+
+    # 6. Demo data ----------------------------------------------------------
     reset = R.section("Demo data", """<div class="card">
         <p>Reseed the demo from scratch (clears the runtime JSON store).</p>
         <form method="post" action="/admin" data-confirm="Reset all demo data?">
           <input type="hidden" name="action" value="reset_demo">
           <button class="btn bad">Reset &amp; reseed demo data</button></form></div>""")
-    return emp + reset
+
+    return create + users_tbl + champ_tbl + emp + audit + reset
 
 
 # --------------------------------------------------------------------------
@@ -1719,23 +1789,6 @@ def post_hid(user, form):
         msg += " Data-quality warning(s): " + "; ".join(warnings)
     return redirect("/report/hid", msg)
 
-    if D.at_record_limit():
-        return redirect("/report/hid", _limit_msg())
-    h = {"id": D.next_id("near_miss_hazard_reports"), "ts": D.now_iso(),
-         "reporter_id": user["id"], "dept_key": q1(form, "dept_key", user["dept_key"]),
-         "type": q1(form, "type", "Hazard"), "severity": q1(form, "severity", "Low"),
-         "location": q1(form, "location", ""), "description": q1(form, "description", ""),
-         "status": "approved"}
-    kind = "hid" if h["type"] == "Hazard" else "near_miss"
-    warnings = _hse_from_form(h, form, kind)
-    D.DB["near_miss_hazard_reports"].append(h)
-    _award(user["id"], h["dept_key"], "hid", "near_miss_hazard_reports", h["id"])
-    D.save()
-    msg = "Hazard/near-miss logged. +%d points." % D.POINTS["hid"]
-    if warnings and not h.get("dq_override"):
-        msg += " Data-quality warning(s): " + "; ".join(warnings)
-    return redirect("/report/hid", msg)
-
 
 def post_incident(user, form):
     if D.at_record_limit():
@@ -2035,9 +2088,16 @@ def post_budgets(user, form):
     return redirect("/budgets")
 
 
+def _champion_count(dept_key):
+    return sum(1 for u in D.DB["users"] if D.has_role(u, "champion") and u.get("dept_key") == dept_key)
+
+
+CHAMPIONS_PER_DEPT = 5
+
+
 def post_admin(user, form):
     if not D.has_perm(user, "user.manage"):
-        return redirect("/admin", "Not permitted.")
+        return redirect("/admin", ACCESS_DENIED)
     action = q1(form, "action")
     if action == "reset_demo":
         D.reset_demo()
@@ -2049,6 +2109,59 @@ def post_admin(user, form):
             d["active_employees"] = max(0, min(qint(form, "active", d["active_employees"]), d["employee_count"]))
             D.save()
         return redirect("/admin", "Department limit updated.")
+
+    # Role / champion management requires the role.manage permission.
+    if action in ("create_user", "set_roles", "assign_champion", "remove_champion"):
+        if not D.has_perm(user, "role.manage"):
+            return redirect("/admin", ACCESS_DENIED)
+        if action == "create_user":
+            name = (q1(form, "name") or "").strip()
+            if not name:
+                return redirect("/admin", "A name is required.")
+            role = q1(form, "role", "worker")
+            if role not in D.ROLE_LABELS:
+                role = "worker"
+            uid = D.next_id("users")
+            D.DB["users"].append({
+                "id": uid, "name": name, "role": role, "roles": [role], "title": D.role_label(role),
+                "dept_key": q1(form, "dept_key") or D.DB["departments"][0]["key"], "company_id": None,
+                "is_contractor": False, "active": True, "is_champion": role == "champion"})
+            D.record_audit(user, "user.create", "users", uid, None, {"name": name, "roles": [role]})
+            D.save()
+            return redirect("/admin", "User created: %s (%s)." % (name, D.role_label(role)))
+
+        target = D.user(qint(form, "user_id"))
+        if not target:
+            return redirect("/admin", "User not found.")
+        if action == "set_roles":
+            new_roles = [r for r in D.ROLE_ORDER if q1(form, "role_%s" % r) == "1"]
+            if not new_roles:
+                return redirect("/admin", "A user must keep at least one role.")
+            if "champion" in new_roles and not D.has_role(target, "champion") and _champion_count(target.get("dept_key")) >= CHAMPIONS_PER_DEPT:
+                return redirect("/admin", "That department already has %d Department Safety Champions." % CHAMPIONS_PER_DEPT)
+            old = D.user_roles(target)
+            target["roles"] = new_roles
+            target["role"] = new_roles[0]
+            target["is_champion"] = "champion" in new_roles
+            D.record_audit(user, "role.update", "users", target["id"], {"roles": old}, {"roles": new_roles})
+            D.save()
+            return redirect("/admin", "Roles updated for %s." % target["name"])
+        if action == "assign_champion":
+            if _champion_count(target.get("dept_key")) >= CHAMPIONS_PER_DEPT:
+                return redirect("/admin", "That department already has %d Department Safety Champions." % CHAMPIONS_PER_DEPT)
+            if not D.has_role(target, "champion"):
+                target["roles"] = D.user_roles(target) + ["champion"]
+                target["is_champion"] = True
+                D.record_audit(user, "champion.assign", "users", target["id"], None, {"dept": target.get("dept_key")})
+                D.save()
+            return redirect("/admin", "%s assigned as Department Safety Champion." % target["name"])
+        if action == "remove_champion":
+            target["roles"] = [r for r in D.user_roles(target) if r != "champion"] or ["worker"]
+            target["role"] = target["roles"][0]
+            target["is_champion"] = False
+            D.record_audit(user, "champion.remove", "users", target["id"], None, {"dept": target.get("dept_key")})
+            D.save()
+            return redirect("/admin", "%s removed as Department Safety Champion." % target["name"])
     return redirect("/admin")
 
 
@@ -2301,6 +2414,7 @@ ROUTE_GUARDS = {
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "SafetyRewards/1.0"
+    protocol_version = "HTTP/1.1"  # keep-alive + Content-Length avoids RST-on-close truncation
 
     def log_message(self, fmt, *args):
         pass  # quiet
@@ -2323,6 +2437,7 @@ class Handler(BaseHTTPRequestHandler):
     def send_redirect(self, location):
         self.send_response(303)
         self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def send_forbidden(self, user, path):
@@ -2337,6 +2452,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def finish(self):
+        # Graceful shutdown (FIN after all buffered data) avoids the Windows
+        # RST-on-close that truncates large responses for clients that send
+        # "Connection: close".
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+        except Exception:
+            pass
+        try:
+            super().finish()
+        except Exception:
+            pass
 
     # -- GET --
     def do_GET(self):
@@ -2360,6 +2492,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(303)
             self.send_header("Location", "/login")
             self.send_header("Set-Cookie", "sid=; Path=/; Max-Age=0")
+            self.send_header("Content-Length", "0")
             self.end_headers()
             return
 
@@ -2403,6 +2536,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(303)
                 self.send_header("Location", "/")
                 self.send_header("Set-Cookie", "sid=%s; Path=/; HttpOnly; SameSite=Lax" % token)
+                self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
             return self.send_redirect("/login?m=Pick+a+user")

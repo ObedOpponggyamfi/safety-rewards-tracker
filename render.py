@@ -42,14 +42,18 @@ def badge(text, kind="muted"):
 STATUS_BADGE = {
     "submitted": "warn", "approved": "ok", "rejected": "bad",
     "open": "warn", "closed": "ok", "under_review": "warn",
-    "pending_admin": "warn", "pending_finance": "warn",
-    "finance_approved": "ok", "released": "ok",
+    "pending_finance": "warn", "finance_approved": "ok", "released": "ok",
+    "finance_rejected": "bad", "budget_hold": "warn",
+    "deferred_next_month": "warn", "deferred_next_quarter": "warn",
 }
 
 STATUS_LABEL = {
-    "pending_admin": "Pending Admin",
-    "pending_finance": "Pending Finance",
+    "pending_finance": "Awaiting Finance Approval",
     "finance_approved": "Finance Approved",
+    "finance_rejected": "Finance Rejected",
+    "budget_hold": "Budget Hold",
+    "deferred_next_month": "Deferred to Next Month",
+    "deferred_next_quarter": "Deferred to Next Quarter",
     "released": "Released",
     "rejected": "Rejected",
 }
@@ -90,8 +94,7 @@ def dept_symbol_cell(dept_key, size=40, extra=""):
 
 # -- Reward approval workflow --
 REWARD_FLOW = [
-    ("pending_admin", "Employee submits"),
-    ("pending_finance", "Admin approves"),
+    ("pending_finance", "Employee submits"),
     ("finance_approved", "Finance approves"),
     ("released", "Reward released"),
 ]
@@ -112,16 +115,20 @@ def reward_flow_diagram(active=None):
 def reward_trail(r):
     """Compact per-request progress trail with timestamps + rejection reason."""
     parts = []
-    if r.get("admin_ts"):
-        parts.append('<span class="trail ok">Admin &check; %s</span>' % esc(D.fmt_date(r["admin_ts"])))
+    if r.get("system_validation_status"):
+        parts.append('<span class="trail ok">System validated</span>')
     if r.get("finance_ts"):
         parts.append('<span class="trail ok">Finance &check; %s</span>' % esc(D.fmt_date(r["finance_ts"])))
     if r.get("released_ts"):
         parts.append('<span class="trail ok">Released %s</span>' % esc(D.fmt_date(r["released_ts"])))
-    if r.get("status") == "rejected":
-        who = "Admin" if r.get("reject_stage") == "admin" else "Finance"
-        parts.append('<span class="trail bad">Rejected by %s: %s</span>'
-                     % (who, esc(r.get("reject_reason") or "no reason given")))
+    if r.get("status") in ("finance_rejected", "rejected"):
+        parts.append('<span class="trail bad">Rejected by Finance: %s</span>'
+                     % esc(r.get("reject_reason") or "no reason given"))
+    if r.get("status") == "budget_hold":
+        parts.append('<span class="trail warn">Budget hold</span>')
+    if r.get("status") in ("deferred_next_month", "deferred_next_quarter"):
+        label = STATUS_LABEL.get(r["status"], r["status"].replace("_", " ").title())
+        parts.append('<span class="trail warn">%s</span>' % esc(label))
     return '<div class="trail-row">%s</div>' % "".join(parts) if parts else ""
 
 
@@ -233,54 +240,8 @@ def section(title, body, actions=""):
 
 
 def nav_for(user):
-    """Return nav groups -> list of (href, label) the user may see."""
-    role = user["role"]
-    groups = []
-    groups.append(("Overview", [("/", "Dashboard"), ("/pro", "Upgrade to Pro")]))
-
-    report = [("/report/observation", "Safety Observation"),
-              ("/report/hid", "Hazard / Near-miss"),
-              ("/report/incident", "Incident"),
-              ("/damage", "Property / Equipment Damage")]
-    groups.append(("Report", report))
-
-    work = []
-    if role in D.REVIEW_ROLES:
-        work.append(("/review", "Review Queue"))
-    work.append(("/actions", "Corrective Actions"))
-    work.append(("/points", "Points Ledger"))
-    groups.append(("Workflow", work))
-
-    groups.append(("HSE Insights", [
-        ("/ai", "AI Safety Insights"),
-        ("/hotspots", "Location Hotspots"),
-        ("/highpotential", "High-Potential Events"),
-        ("/summary", "Dept & Contractor Summary"),
-        ("/quality", "Data Quality")]))
-
-    rewards = [("/rewards", "Reward Catalogue")]
-    if role in D.REWARD_APPROVE_ROLES:
-        rewards.append(("/rewards/approvals", "Reward Approvals"))
-    if role in D.REWARD_RELEASE_ROLES:
-        rewards.append(("/rewards/releases", "Finance Approvals"))
-    groups.append(("Rewards", rewards))
-
-    league = [("/leaderboard", "Leaderboards"),
-              ("/weekly", "Weekly Rewards"),
-              ("/adinkra", "Adinkra Identity"),
-              ("/league", "Adinkra League")]
-    groups.append(("Recognition", league))
-
-    admin = []
-    if role in D.REPORTS_ROLES:
-        admin.append(("/reports", "Report Centre"))
-    if D.can_view_budget(role):
-        admin.append(("/budgets", "Reward Budgets"))
-    if role == "admin":
-        admin.append(("/admin", "Admin Tools"))
-    if admin:
-        groups.append(("Management", admin))
-    return groups
+    """Return nav groups -> list of item dicts the user may see."""
+    return D.nav_for(user)
 
 
 # --------------------------------------------------------------------------
@@ -292,7 +253,9 @@ def page(title, user, body, active="/", msg=""):
     nav_html = ""
     for group_name, items in nav_for(user):
         links = ""
-        for href, label in items:
+        for item in items:
+            href = item["route"]
+            label = item["label"]
             cls = "active" if href == active else ""
             links += '<a class="%s" href="%s">%s</a>' % (cls, href, esc(label))
         nav_html += '<div class="nav-group"><span class="nav-group-title">%s</span>%s</div>' % (esc(group_name), links)
@@ -337,7 +300,7 @@ def page(title, user, body, active="/", msg=""):
         "brand_img": symbol_img(brand["commons_file"], size=34, cls="brand-symbol"),
         "nav": nav_html,
         "uname": esc(user["name"]),
-        "urole": esc(D.role_label(user["role"])),
+        "urole": esc(D.user_role_label(user) or D.role_label(user["role"])),
         "flash": flash(msg),
         "body": body,
     }
@@ -367,9 +330,9 @@ def login_page(users_by_role, msg=""):
     <select name="user_id" required>%(options)s</select>
     <button type="submit">Enter</button>
   </form>
-  <p class="login-note">Demo login &mdash; each user carries a role. Budget modules are
-  visible only to HSE Manager, Management, Finance Manager and Admin; only the
-  Admin can edit a budget.</p>
+  <p class="login-note">Demo login &mdash; each user carries explicitly assigned roles.
+  Menus and routes are permission-gated for Worker, Champion, Supervisor, HSE,
+  Finance, Management and System Administrator demos.</p>
 </div>
 </body></html>""" % {
         "css": CSS,
@@ -531,6 +494,7 @@ textarea{min-height:84px;resize:vertical}
 .trail{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:12px;background:#ece8df;color:#5d564a}
 .trail.ok{background:#dff3e6;color:#176c3c}
 .trail.bad{background:#fadbd6;color:#962014}
+.trail.warn{background:#fbeccd;color:#8a5e08}
 .badge-hot{background:#fbe2cf;color:#9a4d10}
 .bar-chart{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
 .bar-row{display:flex;align-items:center;gap:10px;margin:6px 0;font-size:13px}

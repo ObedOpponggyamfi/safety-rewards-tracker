@@ -21,6 +21,10 @@ python app.py
 
 Then open <http://localhost:8090>. That's it — no install step.
 
+On Windows, double-click **`Open SafeReward App.bat`** from the project folder.
+It starts the app with Python 3, opens the existing local app if the port is
+already running, and keeps the server window visible while you use the app.
+
 | Environment variable | Effect |
 |---|---|
 | `PORT` | Port to serve on (default `8090`). |
@@ -35,18 +39,20 @@ file (or use **Admin Tools → Reset demo data**) to reseed a fresh demo.
 
 Pick any demo user on the sign-in screen — each carries a role:
 
-- **Worker** — report observations/hazards/incidents, earn points, request rewards
-- **Supervisor** — review & approve reports, raise/close corrective actions
-- **HSE Manager** — review queue, reports centre, budget view
-- **Management** — reports centre, budget view
-- **Finance Manager** — approve & release rewards (steps 3–4), budget view
-- **Admin** — approve rewards (step 2), **edit budgets**, manage department employee counts
-- **Contractor Admin** — contractor-side access
+- **Worker / Employee** — submit HID requests, view own points, request rewards
+- **Department Safety Champion** — convert worker HID requests into official HIDs
+- **Supervisor** — verify department HIDs and assigned corrective actions
+- **HSE Officer** — create and review operational HSE records
+- **HSE Manager** — final HID approval/rejection, automatic point outcomes, reports
+- **Finance Approver** — approve, reject, hold, defer and release reward requests
+- **Management** — company reporting and budget setup/approval
+- **System Administrator** — users, roles, departments, champion assignment and settings
 
 ### Budget access control
 
-> Only **HSE Manager, Management, Finance Manager and Admin** can *see* the budget
-> modules, and **only the Admin** can create, edit, approve or lock a budget.
+> Budget visibility and editing are permission-based. Finance can view reward
+> budgets, Management can set and approve budgets, and System Administrator does
+> not automatically inherit Finance, HSE or budget approval permissions.
 
 This is enforced both in the navigation and on every budget route.
 
@@ -83,18 +89,18 @@ points earned − points already released). Each request runs a four-stage flow:
 ```text
 Employee submits reward request
         ↓
-Admin approves            (step 2)
+System validates eligibility and reserves points
         ↓
-Finance Manager approves  (step 3)
+Finance Approver approves / rejects / holds / defers
         ↓
-Reward is released        (step 4)
+Reward is released, or reserved points are restored on rejection
 ```
 
-Tracked at every stage: request status, admin approval, finance approval,
-**rejection reason** (captured at the admin or finance stage), and reward-release
-tracking (who released it and when). Either approver can reject with a reason; a
-released reward's cash value is charged to the department, monthly, quarterly and
-yearly budgets.
+There is no Reward Administrator stage. Valid financial or physical reward
+requests go directly to Finance after system validation. Non-financial rewards
+configured as automatic can release immediately. Released rewards charge the
+department, monthly, quarterly and yearly budgets; rejected Finance requests
+restore reserved points.
 
 ## Monthly Reports Centre
 
@@ -213,8 +219,9 @@ current month + 90 days of detailed history · CSV export only.
 JSON collections already mirror a future relational schema: `users`,
 `departments`, `companies`, `safety_observations`, `near_miss_hazard_reports`,
 `incidents`, `corrective_actions`, `safety_points`, `point_reset_events`,
-`rewards`, `reward_requests`, `yearly_reward_budgets`, `monthly_reward_budgets`,
-`quarterly_reward_budgets`.
+`rewards`, `reward_requests`, `worker_hid_requests`, `roles`, `permissions`,
+`role_permissions`, `user_roles`, `department_access`, `audit_logs`,
+`yearly_reward_budgets`, `monthly_reward_budgets`, `quarterly_reward_budgets`.
 
 ---
 

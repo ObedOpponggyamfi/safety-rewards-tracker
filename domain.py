@@ -29,49 +29,214 @@ DB = {}
 # --------------------------------------------------------------------------
 # Roles and access control
 # --------------------------------------------------------------------------
-# role key -> display label. Login screen lists them in this order.
+# 8 RBAC roles. The Reward Administrator role is removed: HSE is the final
+# authority for points, and reward requests go directly to Finance.
 ROLE_LABELS = {
-    "worker": "Worker",
+    "worker": "Worker / Employee",
+    "champion": "Department Safety Champion",
     "supervisor": "Supervisor",
+    "hse_officer": "HSE Officer",
     "hse_manager": "HSE Manager",
+    "finance_manager": "Finance Approver",
     "management": "Management",
-    "finance_manager": "Finance Manager",
-    "admin": "Admin",
-    "contractor_admin": "Contractor Admin",
+    "admin": "System Administrator",
 }
-ROLE_ORDER = [
-    "worker",
-    "supervisor",
-    "hse_manager",
-    "management",
-    "finance_manager",
-    "admin",
-    "contractor_admin",
+ROLE_ORDER = ["worker", "champion", "supervisor", "hse_officer", "hse_manager",
+              "finance_manager", "management", "admin"]
+ROLE_GROUP_ORDER = {
+    "Overview": 10,
+    "Worker": 20,
+    "Champion": 30,
+    "Supervisor": 40,
+    "HSE": 50,
+    "Finance": 60,
+    "Recognition": 70,
+    "Management": 80,
+    "System": 90,
+}
+
+# Demo login may pick any seeded account; in production this is off and a user
+# can only act as roles explicitly assigned to them.
+DEMO_MODE = True
+
+# Permission catalogue (section 9 of the RBAC spec).
+PERMISSIONS = [
+    "hid_request.create", "hid_request.view_own", "hid.create_for_employee", "hid.verify",
+    "hid.approve", "hid.reject", "points.process_automatic", "points.adjust_authorised",
+    "incident.create", "incident.edit", "incident.approve", "audit.create",
+    "investigation.create", "investigation.approve", "action.assign", "action.update_assigned",
+    "action.verify", "lti.reset", "reward.view_eligibility", "reward.request",
+    "reward.auto_release", "reward.finance_approve", "reward.finance_reject", "reward.release",
+    "reward.defer", "reward.budget_hold", "budget.view", "budget.create", "budget.approve",
+    "report.view_department", "report.view_company", "hse.module", "user.manage", "role.manage",
 ]
 
-# Only Managers, Management and the Finance Team may even see the budget
-# modules; only the Admin can create, edit, approve or lock a budget.
-BUDGET_VIEW_ROLES = {"hse_manager", "management", "finance_manager", "admin"}
-BUDGET_EDIT_ROLES = {"admin"}
+_EARN = {"reward.view_eligibility", "reward.request", "hid_request.create", "hid_request.view_own"}
+_HSE_CREATE = {"incident.create", "incident.edit", "audit.create", "investigation.create",
+               "action.assign", "action.update_assigned", "action.verify", "hid.verify",
+               "report.view_department", "hse.module"}
 
-# Who can approve worker reports / corrective actions.
-REVIEW_ROLES = {"supervisor", "hse_manager", "admin"}
-# Who approves reward requests (stage 1) and who releases them (stage 2).
-REWARD_APPROVE_ROLES = {"admin"}
-REWARD_RELEASE_ROLES = {"finance_manager", "admin"}
-REPORTS_ROLES = {"supervisor", "hse_manager", "management", "finance_manager", "admin"}
+# role -> set of permissions. Users may hold several roles; perms are the union.
+ROLE_PERMISSIONS = {
+    "worker": set(_EARN),
+    "champion": _EARN | {"hid.create_for_employee", "report.view_department"},
+    "supervisor": _EARN | {"hid.verify", "action.update_assigned", "report.view_department", "hse.module"},
+    "hse_officer": set(_HSE_CREATE),
+    "hse_manager": _HSE_CREATE | {"hid.approve", "hid.reject", "incident.approve",
+        "investigation.approve", "points.process_automatic", "points.adjust_authorised",
+        "lti.reset", "report.view_company"},
+    "finance_manager": {"reward.finance_approve", "reward.finance_reject", "reward.release",
+        "reward.defer", "reward.budget_hold", "budget.view"},
+    "management": {"report.view_department", "report.view_company", "budget.view",
+        "budget.create", "budget.approve", "hse.module"},
+    "admin": {"user.manage", "role.manage"},
+}
+
+NAV_ITEMS = [
+    {"group": "Overview", "label": "My Dashboard", "route": "/", "icon": "home",
+     "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 10},
+    {"group": "Overview", "label": "Upgrade to Pro", "route": "/pro", "icon": "lock",
+     "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 90},
+
+    {"group": "Worker", "label": "Submit HID Request", "route": "/hid/request", "icon": "plus",
+     "required_permission": "hid_request.create", "allowed_roles": ["worker", "champion"], "display_order": 10},
+    {"group": "Worker", "label": "My HID Requests", "route": "/hid/requests", "icon": "list",
+     "required_permission": "hid_request.view_own", "allowed_roles": ["worker", "champion"], "display_order": 20},
+    {"group": "Worker", "label": "My Safety Points", "route": "/points", "icon": "star",
+     "required_permission": "reward.view_eligibility", "allowed_roles": ["worker", "champion"], "display_order": 30},
+    {"group": "Worker", "label": "Available Rewards", "route": "/rewards", "icon": "gift",
+     "required_permission": "reward.view_eligibility", "allowed_roles": ["worker", "champion"], "display_order": 40},
+
+    {"group": "Champion", "label": "Champion Dashboard", "route": "/champion", "icon": "shield",
+     "required_permission": "hid.create_for_employee", "allowed_roles": ["champion"], "display_order": 10},
+    {"group": "Champion", "label": "Pending Verification", "route": "/champion/hid-requests", "icon": "clipboard",
+     "required_permission": "hid.create_for_employee", "allowed_roles": ["champion"], "display_order": 20},
+    {"group": "Champion", "label": "Create HID for Employee", "route": "/report/hid", "icon": "edit",
+     "required_permission": "hid.create_for_employee", "allowed_roles": ["champion"], "display_order": 30},
+
+    {"group": "Supervisor", "label": "HID Verification Queue", "route": "/review", "icon": "check",
+     "required_permission": "hid.verify", "allowed_roles": ["supervisor"], "display_order": 10},
+    {"group": "Supervisor", "label": "Assigned Corrective Actions", "route": "/actions", "icon": "wrench",
+     "required_permission": "action.update_assigned", "allowed_roles": ["supervisor"], "display_order": 20},
+
+    {"group": "HSE", "label": "HID Review and Approval", "route": "/review", "icon": "check-circle",
+     "required_permission": "hid.approve", "allowed_roles": ["hse_manager"], "display_order": 10},
+    {"group": "HSE", "label": "Safety Observations", "route": "/report/observation", "icon": "eye",
+     "required_permission": "hse.module", "allowed_roles": ["hse_officer", "hse_manager"], "display_order": 20},
+    {"group": "HSE", "label": "Near Miss / HID", "route": "/report/hid", "icon": "alert",
+     "required_permission": "hse.module", "allowed_roles": ["hse_officer", "hse_manager"], "display_order": 30},
+    {"group": "HSE", "label": "Incident Report", "route": "/report/incident", "icon": "alert-triangle",
+     "required_permission": "incident.create", "allowed_roles": ["hse_officer", "hse_manager"], "display_order": 40},
+    {"group": "HSE", "label": "Property Damage", "route": "/damage", "icon": "tool",
+     "required_permission": "incident.create", "allowed_roles": ["hse_officer", "hse_manager"], "display_order": 50},
+    {"group": "HSE", "label": "Location Hotspots", "route": "/hotspots", "icon": "map",
+     "required_permission": "hse.module", "allowed_roles": ["supervisor", "hse_officer", "hse_manager", "management"], "display_order": 60},
+    {"group": "HSE", "label": "High-Potential Events", "route": "/highpotential", "icon": "zap",
+     "required_permission": "hse.module", "allowed_roles": ["hse_officer", "hse_manager", "management"], "display_order": 70},
+    {"group": "HSE", "label": "AI Safety Prediction", "route": "/ai", "icon": "activity",
+     "required_permission": "hse.module", "allowed_roles": ["supervisor", "hse_officer", "hse_manager", "management"], "display_order": 80},
+    {"group": "HSE", "label": "Data Quality Review", "route": "/quality", "icon": "database",
+     "required_permission": "hse.module", "allowed_roles": ["hse_officer", "hse_manager"], "display_order": 90},
+    {"group": "HSE", "label": "Dept & Contractor Summary", "route": "/summary", "icon": "bar-chart",
+     "required_permission": "report.view_department", "allowed_roles": ["champion", "supervisor", "hse_officer", "hse_manager", "management"], "display_order": 100},
+
+    {"group": "Finance", "label": "Awaiting Finance Approval", "route": "/rewards/releases", "icon": "wallet",
+     "required_permission": "reward.finance_approve", "allowed_roles": ["finance_manager"], "display_order": 10},
+    {"group": "Finance", "label": "Reward Budget", "route": "/budgets", "icon": "banknote",
+     "required_permission": "budget.view", "allowed_roles": ["finance_manager"], "display_order": 20},
+
+    {"group": "Recognition", "label": "Leaderboards", "route": "/leaderboard", "icon": "trophy",
+     "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 10},
+    {"group": "Recognition", "label": "Weekly Rewards", "route": "/weekly", "icon": "calendar",
+     "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 20},
+    {"group": "Recognition", "label": "Adinkra Identity", "route": "/adinkra", "icon": "sparkles",
+     "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 30},
+    {"group": "Recognition", "label": "Adinkra League", "route": "/league", "icon": "flag",
+     "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 40},
+
+    {"group": "Management", "label": "Monthly Reports", "route": "/reports", "icon": "file-text",
+     "required_permission": "report.view_department", "allowed_roles": ["champion", "supervisor", "hse_officer", "hse_manager", "management", "finance_manager"], "display_order": 10},
+    {"group": "Management", "label": "Reward Budgets", "route": "/budgets", "icon": "banknote",
+     "required_permission": "budget.view", "allowed_roles": ["hse_manager", "management"], "display_order": 20},
+
+    {"group": "System", "label": "User Management", "route": "/admin", "icon": "users",
+     "required_permission": "user.manage", "allowed_roles": ["admin"], "display_order": 10},
+]
+
+# Legacy role-set constants kept for a few inline checks; membership reflects the
+# new model (no Reward Administrator; admin is config-only).
+REVIEW_ROLES = {"supervisor", "hse_officer", "hse_manager"}
+REWARD_RELEASE_ROLES = {"finance_manager"}
+REPORTS_ROLES = {"champion", "supervisor", "hse_officer", "hse_manager", "management", "finance_manager"}
+BUDGET_VIEW_ROLES = {"hse_manager", "management", "finance_manager"}
+BUDGET_EDIT_ROLES = {"management"}
 
 
 def role_label(role):
     return ROLE_LABELS.get(role, role.title())
 
 
-def can_view_budget(role):
-    return role in BUDGET_VIEW_ROLES
+def user_roles(user):
+    if not user:
+        return []
+    return user.get("roles") or ([user["role"]] if user.get("role") else [])
 
 
-def can_edit_budget(role):
-    return role in BUDGET_EDIT_ROLES
+def has_role(user, role):
+    return role in user_roles(user)
+
+
+def has_any_role(user, roles):
+    return any(r in roles for r in user_roles(user))
+
+
+def user_perms(user):
+    perms = set()
+    for r in user_roles(user):
+        perms |= ROLE_PERMISSIONS.get(r, set())
+    return perms
+
+
+def has_perm(user, perm):
+    return perm in user_perms(user)
+
+
+def user_role_label(user):
+    roles = user_roles(user)
+    return " + ".join(role_label(r) for r in roles) if roles else ""
+
+
+def can_access_department(user, dept_key):
+    if has_perm(user, "report.view_company"):
+        return True
+    return bool(user and user.get("dept_key") == dept_key)
+
+
+def can_view_budget(user):
+    return has_perm(user, "budget.view")
+
+
+def can_edit_budget(user):
+    return has_perm(user, "budget.create")
+
+
+def nav_for(user):
+    roles = set(user_roles(user))
+    groups = {}
+    for item in NAV_ITEMS:
+        allowed = set(item.get("allowed_roles") or ROLE_ORDER)
+        if allowed and not (roles & allowed):
+            continue
+        perm = item.get("required_permission")
+        if perm and not has_perm(user, perm):
+            continue
+        groups.setdefault(item["group"], []).append(item)
+    ordered = []
+    for group, items in groups.items():
+        items.sort(key=lambda it: (it["display_order"], it["label"]))
+        ordered.append((group, items))
+    ordered.sort(key=lambda pair: (ROLE_GROUP_ORDER.get(pair[0], 999), pair[0]))
+    return ordered
 
 
 # --------------------------------------------------------------------------
@@ -87,6 +252,7 @@ POINTS = {
     "incident": 15,     # reporting an incident is rewarded
     "action_closed": 25,
 }
+VIOLATION_PENALTY = 30  # points deducted when HSE confirms a violation
 
 MONTHS = [
     "January", "February", "March", "April", "May", "June",
@@ -334,6 +500,8 @@ def load():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r", encoding="utf-8") as fh:
             DB = json.load(fh)
+        if ensure_schema(DB):
+            save()
     else:
         DB = seed()
         save()
@@ -361,8 +529,198 @@ _counters = {}
 
 def next_id(collection):
     items = DB.get(collection, [])
-    nums = [it.get("id", 0) for it in items]
+    nums = [it.get("id", it.get("audit_id", 0)) for it in items]
     return (max(nums) + 1) if nums else 1
+
+
+def record_audit(user, action, module, record_id=None, old_value=None, new_value=None,
+                 ip_or_device_reference="local"):
+    DB.setdefault("audit_logs", [])
+    aid = next_id("audit_logs")
+    DB["audit_logs"].append({
+        "id": aid,
+        "audit_id": aid,
+        "user_id": user.get("id") if isinstance(user, dict) else user,
+        "user_role": ",".join(user_roles(user)) if isinstance(user, dict) else "",
+        "action": action,
+        "module": module,
+        "record_id": record_id,
+        "old_value": old_value,
+        "new_value": new_value,
+        "timestamp": now_iso(),
+        "ip_or_device_reference": ip_or_device_reference,
+    })
+
+
+def ensure_schema(db):
+    """Bring older JSON stores up to the current RBAC/workflow shape."""
+    changed = False
+    defaults = {
+        "worker_hid_requests": [],
+        "audit_logs": [],
+        "roles": [],
+        "permissions": [],
+        "role_permissions": [],
+        "user_roles": [],
+        "department_access": [],
+        "settings": {},
+    }
+    for key, value in defaults.items():
+        if key not in db:
+            db[key] = value.copy() if isinstance(value, list) else dict(value)
+            changed = True
+    if "hotspot_thresholds" not in db["settings"]:
+        db["settings"]["hotspot_thresholds"] = dict(DEFAULT_HOTSPOT_THRESHOLDS)
+        changed = True
+    if "demo_mode" not in db["settings"]:
+        db["settings"]["demo_mode"] = DEMO_MODE
+        changed = True
+
+    next_uid = (max([u.get("id", 0) for u in db.get("users", [])] or [0]) + 1)
+
+    def add_user(role, title, dept_key=None):
+        nonlocal next_uid, changed
+        dept_key = dept_key or (db["departments"][0]["key"] if db.get("departments") else "")
+        user_obj = {
+            "id": next_uid, "name": "Demo %s" % role_label(role),
+            "role": role, "roles": [role], "title": title, "dept_key": dept_key,
+            "company_id": None, "is_contractor": False, "active": True,
+        }
+        db["users"].append(user_obj)
+        next_uid += 1
+        changed = True
+        return user_obj
+
+    for u in db.get("users", []):
+        old_role = u.get("role")
+        if old_role == "contractor_admin":
+            u["role"] = "worker"
+            u["title"] = u.get("title") or "Contractor Worker"
+            changed = True
+        elif old_role not in ROLE_LABELS:
+            u["role"] = "worker"
+            changed = True
+        roles = list(u.get("roles") or [u.get("role")])
+        roles = [r for r in roles if r in ROLE_LABELS]
+        if not roles:
+            roles = [u.get("role", "worker")]
+        if u.get("is_champion") and "champion" not in roles:
+            roles.append("champion")
+        if "champion" in roles:
+            u["role"] = "champion"
+            u["title"] = "Department Safety Champion"
+        if u.get("role") not in roles:
+            roles.insert(0, u["role"])
+        if u.get("roles") != roles:
+            u["roles"] = roles
+            changed = True
+
+    for role in ROLE_ORDER:
+        if not any(role in user_roles(u) for u in db.get("users", [])):
+            title = role_label(role)
+            add_user(role, title)
+
+    # Keep at least one champion per first two departments for demo coverage.
+    for dept in db.get("departments", [])[:2]:
+        champs = [u for u in db["users"]
+                  if u.get("dept_key") == dept["key"] and "champion" in user_roles(u)]
+        if not champs:
+            worker = next((u for u in db["users"]
+                           if u.get("dept_key") == dept["key"] and "worker" in user_roles(u)), None)
+            if worker:
+                roles = list(user_roles(worker))
+                if "champion" not in roles:
+                    roles.append("champion")
+                worker["roles"] = roles
+                worker["role"] = "champion"
+                worker["title"] = "Department Safety Champion"
+                worker["is_champion"] = True
+                changed = True
+
+    for rw in db.get("rewards", []):
+        if "release_mode" not in rw:
+            rw["release_mode"] = "automatic" if rw.get("name") == "Safety Champion Plaque" else "finance"
+            changed = True
+        if rw.get("release_mode") == "automatic" and rw.get("cash_value"):
+            rw["cash_value"] = 0
+            changed = True
+
+    role_rows = [{"id": i + 1, "key": role, "label": role_label(role)} for i, role in enumerate(ROLE_ORDER)]
+    if db.get("roles") != role_rows:
+        db["roles"] = role_rows
+        changed = True
+    permission_rows = [{"id": i + 1, "key": perm} for i, perm in enumerate(PERMISSIONS)]
+    if db.get("permissions") != permission_rows:
+        db["permissions"] = permission_rows
+        changed = True
+    rp_rows = [{"role": role, "permission": perm}
+               for role in ROLE_ORDER for perm in sorted(ROLE_PERMISSIONS.get(role, set()))]
+    if db.get("role_permissions") != rp_rows:
+        db["role_permissions"] = rp_rows
+        changed = True
+    ur_rows = [{"user_id": u["id"], "role": role}
+               for u in db.get("users", []) for role in user_roles(u)]
+    if db.get("user_roles") != ur_rows:
+        db["user_roles"] = ur_rows
+        changed = True
+    da_rows = [{"user_id": u["id"], "dept_key": u.get("dept_key")}
+               for u in db.get("users", []) if u.get("dept_key")]
+    if db.get("department_access") != da_rows:
+        db["department_access"] = da_rows
+        changed = True
+
+    if _migrate_reward_requests(db):
+        changed = True
+    if _seed_worker_hid_requests(db):
+        changed = True
+    return changed
+
+
+def _migrate_reward_requests(db):
+    changed = False
+    for r in db.get("reward_requests", []):
+        st = r.get("status")
+        if st == "pending_admin":
+            r["status"] = "pending_finance"
+            r["system_validation_status"] = "validated"
+            changed = True
+        elif st == "rejected":
+            r["status"] = "finance_rejected"
+            if not r.get("reject_stage"):
+                r["reject_stage"] = "finance"
+            changed = True
+        r.setdefault("system_validation_status", "validated")
+        r.setdefault("release_reference", None)
+        r.setdefault("auto_release", False)
+    return changed
+
+
+def _seed_worker_hid_requests(db):
+    if db.get("worker_hid_requests"):
+        return False
+    workers = [u for u in db.get("users", []) if "worker" in user_roles(u) and u.get("role") == "worker"]
+    if not workers:
+        return False
+    for worker in workers[:3]:
+        champ = next((u for u in db["users"]
+                      if "champion" in user_roles(u) and u.get("dept_key") == worker.get("dept_key")), None)
+        db["worker_hid_requests"].append({
+            "id": len(db["worker_hid_requests"]) + 1,
+            "request_id": len(db["worker_hid_requests"]) + 1,
+            "employee_id": worker["id"],
+            "department_id": worker.get("dept_key"),
+            "champion_id": champ["id"] if champ else None,
+            "location_id": "Process Plant",
+            "hazard_summary": "Guarding concern near routine task area",
+            "hazard_description": "Employee reported a hazard that needs champion review.",
+            "photo_reference": "",
+            "reported_date": today().isoformat(),
+            "urgency": "Medium",
+            "request_status": "Submitted",
+            "converted_to_hid_id": None,
+            "created_date": now_iso(),
+        })
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -385,11 +743,18 @@ def seed():
         "point_reset_events": [],
         "rewards": [],
         "reward_requests": [],
+        "worker_hid_requests": [],
+        "audit_logs": [],
         "property_damage": [],
         "yearly_reward_budgets": [],
         "monthly_reward_budgets": [],
         "quarterly_reward_budgets": [],
-        "settings": {"hotspot_thresholds": dict(DEFAULT_HOTSPOT_THRESHOLDS)},
+        "roles": [],
+        "permissions": [],
+        "role_permissions": [],
+        "user_roles": [],
+        "department_access": [],
+        "settings": {"hotspot_thresholds": dict(DEFAULT_HOTSPOT_THRESHOLDS), "demo_mode": DEMO_MODE},
     }
 
     # Departments straight from the Adinkra roster (no "Safety Team" labels).
@@ -427,41 +792,49 @@ def seed():
 
     # Leadership / staff roles (not tied to a single department for scoring).
     staff = [
+        ("HSE Officer", "hse_officer", "fihankra"),
         ("HSE Manager", "hse_manager", "fihankra"),
         ("Management", "management", "adinkrahene"),
-        ("Finance Manager", "finance_manager", "adinkrahene"),
+        ("Finance Approver", "finance_manager", "adinkrahene"),
         ("System Admin", "admin", "adinkrahene"),
     ]
     for title, role, dept_key in staff:
         db["users"].append({
             "id": uid, "name": make_name(), "role": role, "title": title,
             "dept_key": dept_key, "company_id": None, "is_contractor": False,
-            "active": True,
+            "active": True, "roles": [role],
         })
         uid += 1
 
-    # Each department gets one supervisor + several worker-employees.
+    # Each department gets one champion, one supervisor and several workers.
     for dept in db["departments"]:
+        db["users"].append({
+            "id": uid, "name": make_name(), "role": "champion",
+            "title": "Department Safety Champion", "dept_key": dept["key"],
+            "company_id": None, "is_contractor": False, "active": True,
+            "is_champion": True, "roles": ["worker", "champion"],
+        })
+        uid += 1
         db["users"].append({
             "id": uid, "name": make_name(), "role": "supervisor",
             "title": "Supervisor", "dept_key": dept["key"], "company_id": None,
-            "is_contractor": False, "active": True,
+            "is_contractor": False, "active": True, "roles": ["supervisor"],
         })
         uid += 1
         for _ in range(rng.randint(4, 6)):
             db["users"].append({
                 "id": uid, "name": make_name(), "role": "worker",
                 "title": "Worker", "dept_key": dept["key"], "company_id": None,
-                "is_contractor": False, "active": True,
+                "is_contractor": False, "active": True, "roles": ["worker"],
             })
             uid += 1
 
-    # Contractor admins + contractor workers (assigned to departments too).
+    # Contractor workers are assigned to departments too.
     for comp in db["companies"]:
         db["users"].append({
-            "id": uid, "name": make_name(), "role": "contractor_admin",
-            "title": "Contractor Admin", "dept_key": rng.choice(db["departments"])["key"],
-            "company_id": comp["id"], "is_contractor": True, "active": True,
+            "id": uid, "name": make_name(), "role": "worker",
+            "title": "Contractor Worker", "dept_key": rng.choice(db["departments"])["key"],
+            "company_id": comp["id"], "is_contractor": True, "active": True, "roles": ["worker"],
         })
         uid += 1
         for _ in range(rng.randint(4, 6)):
@@ -469,20 +842,21 @@ def seed():
                 "id": uid, "name": make_name(), "role": "worker",
                 "title": "Contractor Worker",
                 "dept_key": rng.choice(db["departments"])["key"],
-                "company_id": comp["id"], "is_contractor": True, "active": True,
+                "company_id": comp["id"], "is_contractor": True, "active": True, "roles": ["worker"],
             })
             uid += 1
 
-    workers = [u for u in db["users"] if u["role"] == "worker"]
+    workers = [u for u in db["users"] if "worker" in user_roles(u)]
 
     # ---- Rewards catalogue -------------------------------------------------
     db["rewards"] = [
-        {"id": 1, "name": "Safety Boots Voucher", "description": "Voucher for a pair of certified safety boots.", "point_cost": 120, "cash_value": 180, "active": True},
+        {"id": 1, "name": "Safety Boots Voucher", "description": "Voucher for a pair of certified safety boots.", "point_cost": 120, "cash_value": 180, "active": True, "release_mode": "finance"},
         {"id": 2, "name": "Fuel Voucher", "description": "GH₵100 fuel voucher.", "point_cost": 80, "cash_value": 100, "active": True},
-        {"id": 3, "name": "Airtime / Data Bundle", "description": "Monthly airtime and data bundle.", "point_cost": 40, "cash_value": 50, "active": True},
-        {"id": 4, "name": "Branded Hard Hat", "description": "Premium branded hard hat.", "point_cost": 60, "cash_value": 75, "active": True},
-        {"id": 5, "name": "Grocery Hamper", "description": "Family grocery hamper.", "point_cost": 150, "cash_value": 220, "active": True},
-        {"id": 6, "name": "Safety Champion Plaque", "description": "Engraved recognition plaque.", "point_cost": 200, "cash_value": 250, "active": True},
+        {"id": 3, "name": "Airtime / Data Bundle", "description": "Monthly airtime and data bundle.", "point_cost": 40, "cash_value": 50, "active": True, "release_mode": "finance"},
+        {"id": 4, "name": "Branded Hard Hat", "description": "Premium branded hard hat.", "point_cost": 60, "cash_value": 75, "active": True, "release_mode": "finance"},
+        {"id": 5, "name": "Grocery Hamper", "description": "Family grocery hamper.", "point_cost": 150, "cash_value": 220, "active": True, "release_mode": "finance"},
+        {"id": 6, "name": "Safety Champion Plaque", "description": "Engraved recognition plaque.", "point_cost": 200, "cash_value": 0, "active": True, "release_mode": "automatic"},
+        {"id": 7, "name": "Safety Recognition Badge", "description": "Non-financial recognition badge, released automatically.", "point_cost": 30, "cash_value": 0, "active": True, "release_mode": "automatic"},
     ]
 
     # ---- Activity + points ledger across the last ~6 weeks ----------------
@@ -664,12 +1038,12 @@ def seed():
     for u in rng.sample(champ_pool, min(FREE_LIMITS["champions"], len(champ_pool))):
         u["is_champion"] = True
 
-    # ---- Reward requests across the 4-stage workflow ----------------------
-    # submit -> admin approves -> finance approves -> released  (or rejected)
+    # ---- Reward requests in the direct Finance workflow -------------------
+    # employee request -> system validation/reservation -> finance -> release
     sample_workers = rng.sample(workers, 9)
-    states = ["pending_admin", "pending_admin", "pending_finance", "pending_finance",
-              "finance_approved", "released", "released", "rejected", "pending_admin"]
-    admin_uid = next(u["id"] for u in db["users"] if u["role"] == "admin")
+    states = ["pending_finance", "pending_finance", "finance_approved", "released",
+              "released", "finance_rejected", "budget_hold", "deferred_next_month",
+              "deferred_next_quarter"]
     finance_uid = next(u["id"] for u in db["users"] if u["role"] == "finance_manager")
     rqid = 1
     for w, st in zip(sample_workers, states):
@@ -677,34 +1051,32 @@ def seed():
         d = anchor - timedelta(days=rng.randint(0, 18))
         base = datetime(d.year, d.month, d.day, 10, 0)
         ts = base.isoformat(timespec="seconds")
-        admin_ts = base + timedelta(days=1)
-        fin_ts = base + timedelta(days=2)
-        rel_ts = base + timedelta(days=3)
+        fin_ts = base + timedelta(days=1)
+        rel_ts = base + timedelta(days=2)
         rq = {
             "id": rqid, "ts": ts, "user_id": w["id"], "dept_key": w["dept_key"],
             "reward_id": reward["id"], "point_cost": reward["point_cost"],
             "cash_value": reward["cash_value"], "status": st,
+            "system_validation_status": "validated",
             "admin_id": None, "admin_ts": None, "finance_id": None, "finance_ts": None,
             "released_by": None, "released_ts": None,
             "reject_reason": None, "rejected_by": None, "reject_stage": None, "rejected_ts": None,
+            "release_reference": None, "auto_release": False,
         }
-        # admin approval recorded for everything past pending_admin (incl. rejected at finance)
-        if st in ("pending_finance", "finance_approved", "released"):
-            rq["admin_id"] = admin_uid
-            rq["admin_ts"] = admin_ts.isoformat(timespec="seconds")
         if st in ("finance_approved", "released"):
             rq["finance_id"] = finance_uid
             rq["finance_ts"] = fin_ts.isoformat(timespec="seconds")
         if st == "released":
             rq["released_by"] = finance_uid
             rq["released_ts"] = rel_ts.isoformat(timespec="seconds")
-        if st == "rejected":
-            rq["admin_id"] = admin_uid
-            rq["admin_ts"] = admin_ts.isoformat(timespec="seconds")
-            rq["rejected_by"] = admin_uid
-            rq["reject_stage"] = "admin"
-            rq["reject_reason"] = "Insufficient supporting evidence for the request."
-            rq["rejected_ts"] = admin_ts.isoformat(timespec="seconds")
+            rq["release_reference"] = "FIN-%04d" % rqid
+        if st == "finance_rejected":
+            rq["finance_id"] = finance_uid
+            rq["finance_ts"] = fin_ts.isoformat(timespec="seconds")
+            rq["rejected_by"] = finance_uid
+            rq["reject_stage"] = "finance"
+            rq["reject_reason"] = "Budget or eligibility validation failed."
+            rq["rejected_ts"] = fin_ts.isoformat(timespec="seconds")
         db["reward_requests"].append(rq)
         rqid += 1
 
@@ -721,6 +1093,7 @@ def seed():
     cq = quarter_of_month(anchor.month)
     db["quarterly_reward_budgets"].append({"id": 1, "year": yr, "quarter": cq, "amount": 60000, "locked": False})
 
+    ensure_schema(db)
     return db
 
 
@@ -847,12 +1220,57 @@ def user_points(uid, year=None, month=None, quarter=None, week=None):
     return total
 
 
+RESERVED_REWARD_STATUSES = {"pending_finance", "finance_approved", "budget_hold",
+                            "deferred_next_month", "deferred_next_quarter"}
+
+
+def lifetime_points(uid):
+    return sum(p["points"] for p in DB["safety_points"] if p["user_id"] == uid)
+
+
+def released_points(uid):
+    return sum(r["point_cost"] for r in DB["reward_requests"]
+               if r["user_id"] == uid and r["status"] == "released")
+
+
+def reserved_points(uid):
+    return sum(r["point_cost"] for r in DB["reward_requests"]
+               if r["user_id"] == uid and r["status"] in RESERVED_REWARD_STATUSES)
+
+
+def rewardable_points(uid):
+    return lifetime_points(uid) - released_points(uid)
+
+
 def user_balance(uid):
-    """Spendable balance = earned points minus released redemptions."""
-    earned = sum(p["points"] for p in DB["safety_points"] if p["user_id"] == uid)
-    spent = sum(r["point_cost"] for r in DB["reward_requests"]
-                if r["user_id"] == uid and r["status"] == "released")
-    return earned - spent
+    """Available points = rewardable points minus points reserved in pending requests."""
+    return rewardable_points(uid) - reserved_points(uid)
+
+
+def reward_budget_validation(dept_key, cash_value, year=None, month=None):
+    """Return (ok, reason) for department, monthly, quarterly and yearly budget checks."""
+    year = year or today().year
+    month = month or today().month
+    quarter = quarter_of_month(month)
+    dept = department(dept_key)
+    if dept and dept_budget_used(dept_key, year, month) + cash_value > dept_monthly_limit(dept):
+        return False, "Department monthly reward limit would be exceeded."
+
+    monthly = next((b for b in DB["monthly_reward_budgets"]
+                    if b["year"] == year and b["month"] == month), None)
+    if monthly and budget_used(year, month=month) + cash_value > monthly["amount"]:
+        return False, "Monthly reward budget would be exceeded."
+
+    quarterly = next((b for b in DB["quarterly_reward_budgets"]
+                      if b["year"] == year and b["quarter"] == quarter), None)
+    if quarterly and budget_used(year, quarter=quarter) + cash_value > quarterly["amount"]:
+        return False, "Quarterly reward budget would be exceeded."
+
+    yearly = next((b for b in DB["yearly_reward_budgets"] if b["year"] == year), None)
+    if yearly and budget_used(year) + cash_value > yearly["amount"]:
+        return False, "Annual reward budget would be exceeded."
+
+    return True, "Validated."
 
 
 def dept_points(dept_key, year=None, month=None, quarter=None):
@@ -920,7 +1338,7 @@ def budget_used(year, month=None, quarter=None):
 def individual_leaderboard(year=None, month=None, quarter=None, week=None, contractors=None, dept_key=None):
     rows = []
     for u in DB["users"]:
-        if u["role"] not in ("worker",):
+        if not has_role(u, "worker"):
             continue
         if contractors is True and not u["is_contractor"]:
             continue
@@ -944,7 +1362,7 @@ def contractor_leaderboard(year=None, month=None, quarter=None, week=None):
     for c in DB["companies"]:
         agg[c["id"]] = {"company_id": c["id"], "name": c["name"], "points": 0, "members": 0}
     for u in DB["users"]:
-        if u["role"] == "worker" and u["is_contractor"] and u["company_id"] in agg:
+        if has_role(u, "worker") and u["is_contractor"] and u["company_id"] in agg:
             agg[u["company_id"]]["points"] += user_points(u["id"], year=year, month=month, quarter=quarter, week=week)
             agg[u["company_id"]]["members"] += 1
     rows = list(agg.values())

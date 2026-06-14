@@ -54,6 +54,24 @@ def page(title, active, body):
     return ("page", title, active, body)
 
 
+ACCESS_DENIED = ("You do not have permission to access this module. "
+                 "Contact your System Administrator if you believe this is incorrect.")
+
+
+def has_any_perm(user, *perms):
+    return any(D.has_perm(user, perm) for perm in perms)
+
+
+def dept_workers(dept_key):
+    return [u for u in D.DB["users"]
+            if D.has_role(u, "worker") and u.get("dept_key") == dept_key and u.get("active", True)]
+
+
+def request_status_badge(status):
+    kind = {"Approved": "ok", "Rejected": "bad", "Closed": "muted"}.get(status, "warn")
+    return R.badge(status, kind)
+
+
 # --------------------------------------------------------------------------
 # Page bodies
 # --------------------------------------------------------------------------
@@ -63,7 +81,7 @@ def body_dashboard(user, qs):
     yr, mo = D.today().year, D.today().month
     q = D.quarter_of_month(mo)
     pending_reviews = len([o for o in D.DB["safety_observations"] if o["status"] == "submitted"])
-    pending_rewards = len([r for r in D.DB["reward_requests"] if r["status"] == "pending_admin"])
+    pending_rewards = len([r for r in D.DB["reward_requests"] if r["status"] == "pending_finance"])
     today_iso = D.today().isoformat()
 
     reps = D._norm_reports(free=True)
@@ -140,15 +158,15 @@ def body_dashboard(user, qs):
 
     # Personal panel for workers / contractors.
     personal = ""
-    if user["role"] == "worker":
+    if D.has_role(user, "worker"):
         bal = D.user_balance(user["id"])
+        reserved = D.reserved_points(user["id"])
         mpts = D.user_points(user["id"], year=yr, month=mo)
-        my_week = D.user_points(user["id"], year=yr, month=mo, week=D.week_in_month(D.today()))
         personal = R.section("My safety points",
             '<div class="grid cols-3">%s%s%s</div>' % (
                 R.stat_card("Spendable balance", "%d pts" % bal),
+                R.stat_card("Reserved", "%d pts" % reserved, "pending reward requests"),
                 R.stat_card("Earned this month", "%d pts" % mpts, "%s %d" % (D.month_name(mo), yr)),
-                R.stat_card("Earned this week", "%d pts" % my_week, D.week_label(D.today())),
             ))
 
     # Department snapshot.
@@ -170,16 +188,17 @@ def body_dashboard(user, qs):
 
     # Action items by role.
     todo = []
-    if user["role"] in D.REVIEW_ROLES and pending_reviews:
+    if has_any_perm(user, "hid.verify", "hid.approve", "points.process_automatic") and pending_reviews:
         todo.append('<a class="btn gold" href="/review">Review queue (%d)</a>' % pending_reviews)
-    if user["role"] in D.REWARD_APPROVE_ROLES and pending_rewards:
-        todo.append('<a class="btn gold" href="/rewards/approvals">Reward approvals (%d)</a>' % pending_rewards)
-    if user["role"] in D.REWARD_RELEASE_ROLES:
+    if D.has_perm(user, "reward.finance_approve"):
         fin = len([r for r in D.DB["reward_requests"]
                    if r["status"] in ("pending_finance", "finance_approved")])
         if fin:
             todo.append('<a class="btn gold" href="/rewards/releases">Finance queue (%d)</a>' % fin)
-    todo.append('<a class="btn" href="/report/observation">Report an observation</a>')
+    if D.has_perm(user, "hid_request.create"):
+        todo.append('<a class="btn" href="/hid/request">Submit HID request</a>')
+    elif D.has_perm(user, "hse.module"):
+        todo.append('<a class="btn" href="/report/observation">Report an observation</a>')
     todo.append('<a class="btn ghost" href="/league">Adinkra League</a>')
     todo_html = R.section("Quick actions", '<div class="pill-row">%s</div>' % "".join(todo))
 
@@ -214,18 +233,33 @@ def body_observation_form(user, qs):
 
 def body_hid_form(user, qs):
     sel_dept = lambda k: ' selected' if k == user["dept_key"] else ''
-    dept_opts = "".join('<option value="%s"%s>%s</option>' % (d["key"], sel_dept(d["key"]), R.esc("%s — %s" % (d["adinkra_name"], d.get("department", "")))) for d in D.DB["departments"])
+    dept_opts = "".join('<option value="%s"%s>%s</option>' % (
+        d["key"], sel_dept(d["key"]),
+        R.esc("%s - %s" % (d["adinkra_name"], d.get("department", ""))))
+        for d in D.DB["departments"])
+    employee_field = ""
+    if D.has_perm(user, "hid.create_for_employee"):
+        selected = qint(qs, "employee_id")
+        opts = "".join('<option value="%d"%s>%s</option>' % (
+            w["id"], " selected" if w["id"] == selected else "",
+            R.esc("%s (%s)" % (w["name"], w.get("title", "Worker"))))
+            for w in dept_workers(user["dept_key"]))
+        employee_field = '<div class="field"><label>Employee</label><select name="submitted_for_user_id" required>%s</select></div>' % opts
+    request_id = qint(qs, "request_id")
+    request_hidden = '<input type="hidden" name="request_id" value="%d">' % request_id if request_id else ""
     form = """<form method="post" action="/report/hid" class="card form-card">
+      %s
       <div class="row-inline">
         <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
         <div class="field"><label>Type</label><select name="type"><option>Hazard</option><option>Near miss</option></select></div>
         <div class="field"><label>Severity</label><select name="severity"><option>Low</option><option>Medium</option><option>High</option></select></div>
       </div>
+      %s
       <div class="field"><label>Location</label><input name="location" required></div>
       <div class="field"><label>Describe the hazard or near-miss</label><textarea name="description" required></textarea></div>
       %s
-      <button class="btn gold" type="submit">Submit report (+%d pts on approval)</button>
-    </form>""" % (dept_opts, R.hse_fields(include_cause=True), D.POINTS["hid"])
+      <button class="btn gold" type="submit">Submit official HID for review</button>
+    </form>""" % (request_hidden, dept_opts, employee_field, R.hse_fields(include_cause=True))
     return R.section("Hazard / Near-miss report (HID)", form)
 
 
@@ -247,7 +281,168 @@ def body_incident_form(user, qs):
     return R.section("Report an incident", form)
 
 
+def body_hid_request_form(user, qs):
+    mine = [r for r in D.DB["worker_hid_requests"] if r["employee_id"] == user["id"]]
+    mine.sort(key=lambda r: r["created_date"], reverse=True)
+    rows = [[D.fmt_date(r["created_date"]), R.esc(r["hazard_summary"]),
+             R.esc(r.get("location_id") or ""), R.esc(r["urgency"]),
+             request_status_badge(r["request_status"])] for r in mine[:10]]
+    form = """<form method="post" action="/hid/request" class="card form-card">
+      <div class="row-inline">
+        <div class="field"><label>Location</label><input name="location_id" placeholder="e.g. Process Plant" required></div>
+        <div class="field"><label>Urgency</label><select name="urgency"><option>Low</option><option selected>Medium</option><option>High</option><option>Critical</option></select></div>
+      </div>
+      <div class="field"><label>Hazard summary</label><input name="hazard_summary" required></div>
+      <div class="field"><label>Hazard description</label><textarea name="hazard_description" required></textarea></div>
+      <div class="field"><label>Photo reference</label><input name="photo_reference" placeholder="optional file name or link"></div>
+      <button class="btn gold" type="submit">Submit HID request</button>
+    </form>"""
+    return R.section("Submit HID request", form) + R.section(
+        "My HID requests",
+        R.table(["Date", "Summary", "Location", "Urgency", "Status"], rows, "No HID requests yet."))
+
+
+def body_my_hid_requests(user, qs):
+    mine = [r for r in D.DB["worker_hid_requests"] if r["employee_id"] == user["id"]]
+    mine.sort(key=lambda r: r["created_date"], reverse=True)
+    rows = []
+    for r in mine:
+        champ = D.user(r.get("champion_id"))
+        rows.append([D.fmt_date(r["created_date"]), R.esc(r["hazard_summary"]),
+                     R.esc(r.get("location_id") or ""), R.esc(r["urgency"]),
+                     R.esc(champ["name"] if champ else "Unassigned"),
+                     request_status_badge(r["request_status"])])
+    return R.section("My HID requests", R.table(
+        ["Date", "Summary", "Location", "Urgency", "Champion", "Status"], rows,
+        "No HID requests yet."))
+
+
+def _champion_requests(user):
+    return [r for r in D.DB["worker_hid_requests"]
+            if r.get("department_id") == user.get("dept_key")]
+
+
+def body_champion_dashboard(user, qs):
+    reqs = _champion_requests(user)
+    submitted = len([r for r in reqs if r["request_status"] in ("Submitted", "Assigned to Champion")])
+    drafting = len([r for r in reqs if r["request_status"] == "Champion Drafting"])
+    converted = len([r for r in reqs if r.get("converted_to_hid_id")])
+    cards = '<div class="grid cols-3">%s%s%s</div>' % (
+        R.stat_card("New employee requests", submitted),
+        R.stat_card("Champion drafting", drafting),
+        R.stat_card("Converted to official HID", converted),
+    )
+    recent = sorted(reqs, key=lambda r: r["created_date"], reverse=True)[:8]
+    rows = []
+    for r in recent:
+        emp = D.user(r["employee_id"])
+        rows.append([D.fmt_date(r["created_date"]), R.esc(emp["name"] if emp else "?"),
+                     R.esc(r["hazard_summary"]), R.esc(r.get("location_id") or ""),
+                     request_status_badge(r["request_status"])])
+    return R.section("Champion dashboard", cards) + R.section(
+        "Recent department HID requests",
+        R.table(["Date", "Employee", "Summary", "Location", "Status"], rows, "No employee requests."))
+
+
+def body_champion_hid_requests(user, qs):
+    reqs = _champion_requests(user)
+    reqs.sort(key=lambda r: r["created_date"])
+    rows = []
+    for r in reqs:
+        emp = D.user(r["employee_id"])
+        action = "&mdash;"
+        if not r.get("converted_to_hid_id") and r["request_status"] not in ("Rejected", "Closed"):
+            action = """<form class="inline" method="post" action="/champion/hid-requests">
+                <input type="hidden" name="action" value="convert">
+                <input type="hidden" name="id" value="%d">
+                <button class="btn ok sm">Convert to official HID</button></form>""" % r["id"]
+        rows.append([D.fmt_date(r["created_date"]), R.esc(emp["name"] if emp else "?"),
+                     R.esc(r["hazard_summary"]), R.esc(r.get("location_id") or ""),
+                     R.esc(r["urgency"]), request_status_badge(r["request_status"]), action])
+    return R.section("Pending employee HID requests", R.table(
+        ["Date", "Employee", "Summary", "Location", "Urgency", "Status", ""], rows,
+        "No department HID requests."))
+
+
 def body_review(user, qs):
+    sections = []
+
+    if D.has_perm(user, "hid.verify"):
+        pending_hids = [h for h in D.DB["near_miss_hazard_reports"]
+                        if h.get("supervisor_verification_status") in (None, "pending")
+                        and h.get("status") == "submitted"
+                        and D.can_access_department(user, h.get("dept_key"))]
+        pending_hids.sort(key=lambda h: h["ts"])
+        rows = []
+        for h in pending_hids:
+            employee = D.user(h.get("submitted_for_user_id") or h.get("reporter_id"))
+            action = """<form class="inline" method="post" action="/review">
+                <input type="hidden" name="rtype" value="hid">
+                <input type="hidden" name="id" value="%d">
+                <button class="btn ok sm" name="action" value="verify">Verify</button></form>""" % h["id"]
+            rows.append([D.fmt_date(h["ts"]), R.esc(employee["name"] if employee else "?"),
+                         R.dept_label_html(h["dept_key"]), R.esc(h.get("type", "Hazard")),
+                         R.esc(h.get("location", "")), action])
+        sections.append(R.section("HID verification queue",
+            R.table(["Date", "Employee", "Department", "Type", "Location", "Supervisor action"],
+                    rows, "No HIDs awaiting supervisor verification.")))
+
+    if D.has_perm(user, "hid.approve"):
+        hse_hids = [h for h in D.DB["near_miss_hazard_reports"]
+                    if h.get("supervisor_verification_status") == "verified"
+                    and h.get("hse_approval_status") in (None, "pending")
+                    and D.can_access_department(user, h.get("dept_key"))]
+        hse_hids.sort(key=lambda h: h["ts"])
+        rows = []
+        for h in hse_hids:
+            employee = D.user(h.get("submitted_for_user_id") or h.get("reporter_id"))
+            action = """<form class="inline" method="post" action="/review">
+                <input type="hidden" name="rtype" value="hid">
+                <input type="hidden" name="id" value="%d">
+                <button class="btn ok sm" name="action" value="approve">Approve +%d</button></form>
+              <form class="inline" method="post" action="/review">
+                <input type="hidden" name="rtype" value="hid">
+                <input type="hidden" name="id" value="%d">
+                <input name="reason" placeholder="Reason" style="width:150px;display:inline-block">
+                <button class="btn bad sm" name="action" value="reject">Reject</button></form>
+              <form class="inline" method="post" action="/review" data-confirm="Confirm a violation and deduct %d points?">
+                <input type="hidden" name="rtype" value="hid">
+                <input type="hidden" name="id" value="%d">
+                <button class="btn sm" name="action" value="violation">Violation &minus;%d</button></form>""" % (
+                    h["id"], D.POINTS["hid"], h["id"], D.VIOLATION_PENALTY, h["id"], D.VIOLATION_PENALTY)
+            rows.append([D.fmt_date(h["ts"]), R.esc(employee["name"] if employee else "?"),
+                         R.dept_label_html(h["dept_key"]), R.esc(h.get("type", "Hazard")),
+                         R.esc(h.get("severity", "")), R.esc(h.get("location", "")), action])
+        sections.append(R.section("HSE HID approval",
+            R.table(["Date", "Employee", "Department", "Type", "Severity", "Location", "HSE decision"],
+                    rows, "No verified HIDs awaiting HSE approval.")))
+
+    if D.has_perm(user, "points.process_automatic"):
+        pending_obs = [o for o in D.DB["safety_observations"] if o["status"] == "submitted"]
+        pending_obs.sort(key=lambda o: o["ts"])
+        rows = []
+        for o in pending_obs:
+            if not D.can_access_department(user, o.get("dept_key")):
+                continue
+            rep = D.user(o["reporter_id"])
+            actions = ("""<form class="inline" method="post" action="/review">
+                <input type="hidden" name="rtype" value="observation">
+                <input type="hidden" name="id" value="%d"><input type="hidden" name="action" value="approve">
+                <button class="btn ok sm">Approve +%d</button></form>
+              <form class="inline" method="post" action="/review">
+                <input type="hidden" name="rtype" value="observation">
+                <input type="hidden" name="id" value="%d"><input type="hidden" name="action" value="reject">
+                <button class="btn bad sm">Reject</button></form>"""
+                % (o["id"], D.POINTS["observation"], o["id"]))
+            rows.append([D.fmt_date(o["ts"]), R.esc(rep["name"] if rep else "?"),
+                         R.dept_label_html(o["dept_key"]), R.esc(o["category"]),
+                         R.esc(o["location"]), actions])
+        sections.append(R.section("Observation approval",
+            R.table(["Date", "Reporter", "Department", "Category", "Location", "Decision"],
+                    rows, "No observations awaiting HSE approval.")))
+
+    return "".join(sections) if sections else R.section("Review queue", '<div class="empty">%s</div>' % ACCESS_DENIED)
+
     pending = [o for o in D.DB["safety_observations"] if o["status"] == "submitted"]
     pending.sort(key=lambda o: o["ts"])
     rows = []
@@ -269,9 +464,9 @@ def body_review(user, qs):
 
 def body_actions(user, qs):
     create = ""
-    if user["role"] in D.REVIEW_ROLES:
+    if D.has_perm(user, "action.assign"):
         dept_opts = "".join('<option value="%s">%s</option>' % (d["key"], R.esc("%s — %s" % (d["adinkra_name"], d.get("department", "")))) for d in D.DB["departments"])
-        worker_opts = "".join('<option value="%d">%s</option>' % (u["id"], R.esc(u["name"])) for u in D.DB["users"] if u["role"] == "worker")
+        worker_opts = "".join('<option value="%d">%s</option>' % (u["id"], R.esc(u["name"])) for u in D.DB["users"] if D.has_role(u, "worker"))
         create = R.section("Raise a corrective action", """<form method="post" action="/actions" class="card form-card">
           <input type="hidden" name="action" value="create">
           <div class="row-inline">
@@ -283,6 +478,8 @@ def body_actions(user, qs):
           <button class="btn">Create action</button></form>""" % (dept_opts, worker_opts))
 
     open_actions = [a for a in D.DB["corrective_actions"] if a["status"] == "open"]
+    if not D.has_perm(user, "report.view_company"):
+        open_actions = [a for a in open_actions if a.get("owner_id") == user["id"] or a.get("dept_key") == user.get("dept_key")]
     open_actions.sort(key=lambda a: a.get("due") or "")
     rows = []
     today = D.today().isoformat()
@@ -310,7 +507,7 @@ def body_points(user, qs):
     entries = list(D.DB["safety_points"])
     if dept:
         entries = [p for p in entries if p["dept_key"] == dept]
-    if user["role"] == "worker":
+    if D.has_role(user, "worker") and not has_any_perm(user, "report.view_department", "report.view_company"):
         entries = [p for p in entries if p["user_id"] == user["id"]]
     entries.sort(key=lambda p: p["ts"], reverse=True)
     rows = []
@@ -320,7 +517,7 @@ def body_points(user, qs):
                      R.dept_label_html(p["dept_key"]), R.esc(p["reason"]),
                      '<strong>+%d</strong>' % p["points"]])
     dept_filter = ""
-    if user["role"] != "worker":
+    if has_any_perm(user, "report.view_department", "report.view_company"):
         opts = '<option value="">All departments</option>' + "".join(
             '<option value="%s"%s>%s</option>' % (d["key"], " selected" if d["key"] == dept else "", R.esc(d["adinkra_name"]))
             for d in D.DB["departments"])
@@ -333,14 +530,18 @@ def body_points(user, qs):
 
 def body_rewards(user, qs):
     bal = D.user_balance(user["id"])
-    head = R.stat_card("My spendable balance", "%d pts" % bal) if user["role"] == "worker" else ""
+    head = ""
+    if D.has_perm(user, "reward.view_eligibility"):
+        head = (R.stat_card("Available points", "%d pts" % bal)
+                + R.stat_card("Reserved points", "%d pts" % D.reserved_points(user["id"]))
+                + R.stat_card("Lifetime points", "%d pts" % D.lifetime_points(user["id"])))
     cards = ""
     for rw in D.DB["rewards"]:
         if not rw["active"]:
             continue
-        can_afford = user["role"] == "worker" and bal >= rw["point_cost"]
+        can_afford = D.has_perm(user, "reward.request") and bal >= rw["point_cost"]
         btn = ""
-        if user["role"] == "worker":
+        if D.has_perm(user, "reward.request"):
             disabled = "" if can_afford else "disabled"
             btn = """<form method="post" action="/rewards" style="margin-top:10px">
                 <input type="hidden" name="action" value="request"><input type="hidden" name="reward_id" value="%d">
@@ -357,7 +558,7 @@ def body_rewards(user, qs):
               D.fmt_money(r["cash_value"]), R.status_badge(r["status"]), R.reward_trail(r) or "&mdash;"]
              for r in mine]
     my_section = ""
-    if user["role"] == "worker":
+    if D.has_perm(user, "reward.view_eligibility"):
         my_section = (R.reward_flow_diagram()
                       + R.section("My reward requests",
                                   R.table(["Date", "Reward", "Cost", "Value", "Status", "Progress"],
@@ -366,28 +567,61 @@ def body_rewards(user, qs):
 
 
 def body_reward_approvals(user, qs):
-    pending = [r for r in D.DB["reward_requests"] if r["status"] == "pending_admin"]
-    pending.sort(key=lambda r: r["ts"])
-    rows = []
-    for r in pending:
-        u = D.user(r["user_id"])
-        bal = D.user_balance(r["user_id"])
-        decide = """<form class="inline" method="post" action="/rewards/approvals">
-            <input type="hidden" name="id" value="%d">
-            <button class="btn ok sm" name="action" value="approve">Approve</button></form>
-          <form class="inline" method="post" action="/rewards/approvals">
-            <input type="hidden" name="id" value="%d">
-            <input name="reason" placeholder="Reason (if rejecting)" style="width:160px;display:inline-block">
-            <button class="btn bad sm" name="action" value="reject">Reject</button></form>""" % (r["id"], r["id"])
-        rows.append([D.fmt_date(r["ts"]), R.esc(u["name"] if u else "?"), R.dept_label_html(r["dept_key"]),
-                     R.esc(D.reward(r["reward_id"])["name"]), "%d pts" % r["point_cost"],
-                     "%d pts" % bal, decide])
-    note = '<p class="hint">Step 2 of the workflow. Approved requests move on to the Finance Manager.</p>'
-    return R.reward_flow_diagram("pending_admin") + note + R.section("Reward approvals · Admin",
-        R.table(["Date", "Worker", "Department", "Reward", "Cost", "Balance", "Decision"], rows, "Nothing awaiting admin approval."))
+    return R.section("Reward approvals removed",
+        '<div class="empty">Reward Administrator approval has been removed. Valid reward requests go directly to Finance.</div>')
 
 
 def body_reward_finance(user, qs):
+    yr, mo = D.today().year, D.today().month
+
+    pend = [r for r in D.DB["reward_requests"] if r["status"] == "pending_finance"]
+    pend.sort(key=lambda r: r["ts"])
+    prows = []
+    for r in pend:
+        u = D.user(r["user_id"])
+        decide = """<form class="inline" method="post" action="/rewards/releases">
+            <input type="hidden" name="id" value="%d">
+            <button class="btn ok sm" name="action" value="fin_approve">Approve</button></form>
+          <form class="inline" method="post" action="/rewards/releases">
+            <input type="hidden" name="id" value="%d">
+            <input name="reason" placeholder="Reason (if rejecting)" style="width:160px;display:inline-block">
+            <button class="btn bad sm" name="action" value="reject">Reject</button></form>
+          <form class="inline" method="post" action="/rewards/releases">
+            <input type="hidden" name="id" value="%d">
+            <button class="btn ghost sm" name="action" value="hold">Budget hold</button></form>
+          <form class="inline" method="post" action="/rewards/releases">
+            <input type="hidden" name="id" value="%d">
+            <button class="btn ghost sm" name="action" value="defer_month">Defer month</button></form>""" % (
+                r["id"], r["id"], r["id"], r["id"])
+        prows.append([D.fmt_date(r["ts"]), R.esc(u["name"] if u else "?"), R.dept_label_html(r["dept_key"]),
+                      R.esc(D.reward(r["reward_id"])["name"]), "%d pts" % r["point_cost"],
+                      "%d pts" % D.rewardable_points(r["user_id"]), D.fmt_money(r["cash_value"]), decide])
+    finance_tbl = R.section("Awaiting Finance approval",
+        R.table(["Submitted", "Worker", "Department", "Reward", "Points", "Eligible points", "Value", "Decision"], prows,
+                "Nothing awaiting finance approval."))
+
+    appr = [r for r in D.DB["reward_requests"]
+            if r["status"] in ("finance_approved", "budget_hold", "deferred_next_month", "deferred_next_quarter")]
+    appr.sort(key=lambda r: r["ts"])
+    rrows = []
+    for r in appr:
+        u = D.user(r["user_id"])
+        dept = D.department(r["dept_key"])
+        limit = D.dept_monthly_limit(dept) if dept else 0
+        used = D.dept_budget_used(r["dept_key"], yr, mo)
+        flag = R.badge("Within limit", "ok") if (used + r["cash_value"]) <= limit else R.badge("Over dept limit", "bad")
+        btn = """<form class="inline" method="post" action="/rewards/releases">
+            <input type="hidden" name="id" value="%d">
+            <input name="release_reference" placeholder="Reference" style="width:130px;display:inline-block">
+            <button class="btn ok sm" name="action" value="release">Release %s</button></form>""" % (r["id"], D.fmt_money(r["cash_value"]))
+        rrows.append([D.fmt_date(r["ts"]), R.esc(u["name"] if u else "?"), R.dept_label_html(r["dept_key"]),
+                      R.esc(D.reward(r["reward_id"])["name"]), R.status_badge(r["status"]),
+                      D.fmt_money(r["cash_value"]), flag, btn])
+    release_tbl = R.section("Reward release",
+        R.table(["Submitted", "Worker", "Department", "Reward", "Status", "Value", "Dept budget", "Release"], rrows,
+                "No finance-approved requests awaiting release."))
+    return R.reward_flow_diagram("finance_approved") + finance_tbl + release_tbl
+
     yr, mo = D.today().year, D.today().month
 
     # Step 3 -- Finance Manager approval of admin-approved requests.
@@ -790,11 +1024,11 @@ def body_budgets(user, qs):
     yr = qint(qs, "year", D.today().year)
     mo = qint(qs, "month", D.today().month)
     q = D.quarter_of_month(mo)
-    editable = D.can_edit_budget(user["role"])
+    editable = D.can_edit_budget(user)
 
-    note = ('<p class="hint">Visible to HSE Manager, Management, Finance Manager and Admin. '
-            + ("You are the Admin &mdash; you can create, edit and lock budgets."
-               if editable else "Only the Admin can create, edit or lock a budget.") + "</p>")
+    note = ('<p class="hint">Visible to authorised budget roles. '
+            + ("You can create, edit and lock budgets."
+               if editable else "Budget setup is read-only for this role.") + "</p>")
 
     def budget_row(b, kind):
         used = (D.budget_used(b["year"], month=b.get("month")) if kind == "monthly"
@@ -947,8 +1181,8 @@ def body_hotspots(user, qs):
 
     th = D.hotspot_thresholds()
     thresh = ""
-    if user["role"] in ("hse_manager", "admin"):
-        thresh = R.section("Hotspot thresholds (HSE Admin)", """<form class="card form-card" method="post" action="/hotspots">
+    if D.has_role(user, "hse_manager"):
+        thresh = R.section("Hotspot thresholds (HSE Manager)", """<form class="card form-card" method="post" action="/hotspots">
           <input type="hidden" name="action" value="thresholds">
           <div class="row-inline">
             <div class="field"><label>Watch &ge;</label><input name="watch" type="number" min="1" value="%d"></div>
@@ -1308,8 +1542,8 @@ def post_damage(user, form):
 
 
 def post_hotspots(user, form):
-    if user["role"] not in ("hse_manager", "admin"):
-        return redirect("/hotspots", "Only HSE Admin can adjust thresholds.")
+    if not D.has_role(user, "hse_manager"):
+        return redirect("/hotspots", "Only the HSE Manager can adjust thresholds.")
     if q1(form, "action") == "thresholds":
         try:
             th = {"watch": int(q1(form, "watch") or 3), "high": int(q1(form, "high") or 6),
@@ -1383,7 +1617,108 @@ def post_observation(user, form):
     return redirect("/report/observation", msg)
 
 
+def post_hid_request(user, form):
+    if not D.has_perm(user, "hid_request.create"):
+        return redirect("/hid/request", ACCESS_DENIED)
+    champ = next((u for u in D.DB["users"]
+                  if D.has_role(u, "champion") and u.get("dept_key") == user.get("dept_key")), None)
+    rid = D.next_id("worker_hid_requests")
+    D.DB["worker_hid_requests"].append({
+        "id": rid,
+        "request_id": rid,
+        "employee_id": user["id"],
+        "department_id": user["dept_key"],
+        "champion_id": champ["id"] if champ else None,
+        "location_id": q1(form, "location_id", ""),
+        "hazard_summary": q1(form, "hazard_summary", ""),
+        "hazard_description": q1(form, "hazard_description", ""),
+        "photo_reference": q1(form, "photo_reference", ""),
+        "reported_date": D.today().isoformat(),
+        "urgency": q1(form, "urgency", "Medium"),
+        "request_status": "Assigned to Champion" if champ else "Submitted",
+        "converted_to_hid_id": None,
+        "created_date": D.now_iso(),
+    })
+    D.record_audit(user, "hid_request.create", "worker_hid_requests", rid,
+                   None, {"status": "Assigned to Champion" if champ else "Submitted"})
+    D.save()
+    return redirect("/hid/requests", "HID request submitted to your Department Safety Champion.")
+
+
+def post_champion_hid_requests(user, form):
+    if not D.has_perm(user, "hid.create_for_employee"):
+        return redirect("/champion/hid-requests", ACCESS_DENIED)
+    req = next((r for r in D.DB["worker_hid_requests"] if r["id"] == qint(form, "id")), None)
+    if not req or req.get("department_id") != user.get("dept_key"):
+        return redirect("/champion/hid-requests", "Request not found.")
+    if req.get("converted_to_hid_id"):
+        return redirect("/champion/hid-requests", "Request was already converted.")
+    hid_id = D.next_id("near_miss_hazard_reports")
+    h = {
+        "id": hid_id,
+        "ts": D.now_iso(),
+        "reporter_id": user["id"],
+        "dept_key": req["department_id"],
+        "type": "Hazard",
+        "severity": req.get("urgency") if req.get("urgency") in ("Low", "Medium", "High") else "High",
+        "location": req.get("location_id") or "",
+        "description": req.get("hazard_description") or req.get("hazard_summary") or "",
+        "status": "submitted",
+        "submitted_by_user_id": user["id"],
+        "submitted_for_user_id": req["employee_id"],
+        "submission_mode": "champion_converted",
+        "champion_department_id": user.get("dept_key"),
+        "employee_department_id": req["department_id"],
+        "employee_confirmation_status": "pending",
+        "supervisor_verification_status": "pending",
+        "hse_approval_status": "pending",
+        "source_request_id": req["id"],
+    }
+    D.DB["near_miss_hazard_reports"].append(h)
+    req["request_status"] = "Submitted to HSE"
+    req["converted_to_hid_id"] = hid_id
+    req["champion_id"] = user["id"]
+    D.record_audit(user, "hid.convert", "near_miss_hazard_reports", hid_id,
+                   {"worker_hid_request": req["id"]}, {"status": "submitted"})
+    D.save()
+    return redirect("/champion/hid-requests", "Employee HID request converted to an official HID.")
+
+
 def post_hid(user, form):
+    if not has_any_perm(user, "hid.create_for_employee", "hse.module"):
+        return redirect("/report/hid", ACCESS_DENIED)
+    if D.at_record_limit():
+        return redirect("/report/hid", _limit_msg())
+    submitted_for = qint(form, "submitted_for_user_id", user["id"])
+    submitted_for_user = D.user(submitted_for)
+    if D.has_perm(user, "hid.create_for_employee"):
+        if not submitted_for_user or submitted_for_user.get("dept_key") != user.get("dept_key"):
+            return redirect("/report/hid", "Champions can create HIDs only for employees in their department.")
+    h = {"id": D.next_id("near_miss_hazard_reports"), "ts": D.now_iso(),
+         "reporter_id": user["id"], "dept_key": q1(form, "dept_key", user["dept_key"]),
+         "type": q1(form, "type", "Hazard"), "severity": q1(form, "severity", "Low"),
+         "location": q1(form, "location", ""), "description": q1(form, "description", ""),
+         "status": "submitted", "submitted_by_user_id": user["id"],
+         "submitted_for_user_id": submitted_for, "submission_mode": "champion_created" if D.has_perm(user, "hid.create_for_employee") else "hse_created",
+         "champion_department_id": user.get("dept_key") if D.has_perm(user, "hid.create_for_employee") else None,
+         "employee_department_id": submitted_for_user.get("dept_key") if submitted_for_user else q1(form, "dept_key", user["dept_key"]),
+         "employee_confirmation_status": "pending", "supervisor_verification_status": "pending",
+         "hse_approval_status": "pending", "source_request_id": qint(form, "request_id")}
+    kind = "hid" if h["type"] == "Hazard" else "near_miss"
+    warnings = _hse_from_form(h, form, kind)
+    D.DB["near_miss_hazard_reports"].append(h)
+    req = next((r for r in D.DB["worker_hid_requests"] if r["id"] == h.get("source_request_id")), None)
+    if req:
+        req["request_status"] = "Submitted to HSE"
+        req["converted_to_hid_id"] = h["id"]
+    D.record_audit(user, "hid.create", "near_miss_hazard_reports", h["id"],
+                   None, {"submitted_for_user_id": submitted_for, "status": "submitted"})
+    D.save()
+    msg = "Official HID submitted for supervisor verification."
+    if warnings and not h.get("dq_override"):
+        msg += " Data-quality warning(s): " + "; ".join(warnings)
+    return redirect("/report/hid", msg)
+
     if D.at_record_limit():
         return redirect("/report/hid", _limit_msg())
     h = {"id": D.next_id("near_miss_hazard_reports"), "ts": D.now_iso(),
@@ -1432,17 +1767,93 @@ def _award(user_id, dept_key, kind, src_type, src_id):
 
 
 def post_review(user, form):
-    if user["role"] not in D.REVIEW_ROLES:
-        return redirect("/review", "Not permitted.")
+    rtype = q1(form, "rtype", "observation")
+    action = q1(form, "action")
+
+    if rtype == "hid":
+        h = next((x for x in D.DB["near_miss_hazard_reports"] if x["id"] == qint(form, "id")), None)
+        if not h:
+            return redirect("/review", "HID not found.")
+        if not D.can_access_department(user, h.get("dept_key")):
+            return redirect("/review", ACCESS_DENIED)
+        if action == "verify":
+            if not D.has_perm(user, "hid.verify"):
+                return redirect("/review", ACCESS_DENIED)
+            h["supervisor_verification_status"] = "verified"
+            h["supervisor_verified_by"] = user["id"]
+            h["supervisor_verified_ts"] = D.now_iso()
+            h["status"] = "verified"
+            D.record_audit(user, "hid.verify", "near_miss_hazard_reports", h["id"],
+                           {"status": "submitted"}, {"status": "verified"})
+            D.save()
+            return redirect("/review", "HID verified and sent to HSE.")
+        if action == "approve":
+            if not D.has_perm(user, "hid.approve"):
+                return redirect("/review", ACCESS_DENIED)
+            h["hse_approval_status"] = "approved"
+            h["hse_approved_by"] = user["id"]
+            h["hse_approved_ts"] = D.now_iso()
+            h["status"] = "approved"
+            target_user_id = h.get("submitted_for_user_id") or h.get("reporter_id")
+            if not any(p for p in D.DB["safety_points"]
+                       if p.get("source_type") == "near_miss_hazard_reports" and p.get("source_id") == h["id"]):
+                _award(target_user_id, h["dept_key"], "hid", "near_miss_hazard_reports", h["id"])
+            req = next((r for r in D.DB["worker_hid_requests"] if r.get("converted_to_hid_id") == h["id"]), None)
+            if req:
+                req["request_status"] = "Approved"
+            D.record_audit(user, "hid.approve", "near_miss_hazard_reports", h["id"],
+                           {"hse_approval_status": "pending"}, {"hse_approval_status": "approved"})
+            D.record_audit(user, "point_award", "safety_points", h["id"],
+                           None, {"user_id": target_user_id, "points": D.POINTS["hid"]})
+            D.save()
+            return redirect("/review", "HID approved. %d points awarded automatically." % D.POINTS["hid"])
+        if action == "reject":
+            if not D.has_perm(user, "hid.reject"):
+                return redirect("/review", ACCESS_DENIED)
+            h["hse_approval_status"] = "rejected"
+            h["hse_rejected_by"] = user["id"]
+            h["hse_rejected_ts"] = D.now_iso()
+            h["hse_rejection_reason"] = q1(form, "reason") or "No reason provided."
+            h["status"] = "rejected"
+            req = next((r for r in D.DB["worker_hid_requests"] if r.get("converted_to_hid_id") == h["id"]), None)
+            if req:
+                req["request_status"] = "Rejected"
+            D.record_audit(user, "hid.reject", "near_miss_hazard_reports", h["id"],
+                           {"hse_approval_status": "pending"}, {"reason": h["hse_rejection_reason"]})
+            D.save()
+            return redirect("/review", "HID rejected. No points awarded.")
+        if action == "violation":
+            if not D.has_perm(user, "points.process_automatic"):
+                return redirect("/review", ACCESS_DENIED)
+            target_user_id = h.get("submitted_for_user_id") or h.get("reporter_id")
+            D.DB["safety_points"].append({
+                "id": D.next_id("safety_points"), "ts": D.now_iso(), "user_id": target_user_id,
+                "dept_key": h["dept_key"], "points": -D.VIOLATION_PENALTY,
+                "reason": "Violation confirmed by HSE", "source_type": "violation", "source_id": h["id"]})
+            h["violation_recorded"] = True
+            D.record_audit(user, "point_deduction", "safety_points", h["id"],
+                           None, {"user_id": target_user_id, "points": -D.VIOLATION_PENALTY})
+            D.save()
+            return redirect("/review", "Violation confirmed. %d points deducted." % D.VIOLATION_PENALTY)
+        return redirect("/review", "No change.")
+
+    if not D.has_perm(user, "points.process_automatic"):
+        return redirect("/review", ACCESS_DENIED)
     o = next((x for x in D.DB["safety_observations"] if x["id"] == qint(form, "id")), None)
     if not o:
         return redirect("/review", "Observation not found.")
-    if q1(form, "action") == "approve":
+    if not D.can_access_department(user, o.get("dept_key")):
+        return redirect("/review", ACCESS_DENIED)
+    if action == "approve":
         o["status"] = "approved"
         _award(o["reporter_id"], o["dept_key"], "observation", "safety_observations", o["id"])
+        D.record_audit(user, "observation.approve", "safety_observations", o["id"],
+                       {"status": "submitted"}, {"status": "approved"})
         msg = "Approved. +%d points awarded." % D.POINTS["observation"]
     else:
         o["status"] = "rejected"
+        D.record_audit(user, "observation.reject", "safety_observations", o["id"],
+                       {"status": "submitted"}, {"status": "rejected"})
         msg = "Observation rejected."
     D.save()
     return redirect("/review", msg)
@@ -1451,7 +1862,7 @@ def post_review(user, form):
 def post_actions(user, form):
     action = q1(form, "action")
     if action == "create":
-        if user["role"] not in D.REVIEW_ROLES:
+        if not D.has_perm(user, "action.assign"):
             return redirect("/actions", "Not permitted.")
         a = {"id": D.next_id("corrective_actions"), "ts": D.now_iso(), "source_type": "manual",
              "source_id": 0, "dept_key": q1(form, "dept_key"), "owner_id": qint(form, "owner_id"),
@@ -1463,6 +1874,8 @@ def post_actions(user, form):
     if action == "close":
         a = next((x for x in D.DB["corrective_actions"] if x["id"] == qint(form, "id")), None)
         if a and a["status"] == "open":
+            if a.get("owner_id") != user["id"] and not D.has_perm(user, "action.verify"):
+                return redirect("/actions", "Not permitted.")
             a["status"] = "closed"
             a["closed_ts"] = D.now_iso()
             _award(a["owner_id"], a["dept_key"], "action_closed", "corrective_actions", a["id"])
@@ -1472,26 +1885,46 @@ def post_actions(user, form):
 
 
 def post_reward_request(user, form):
-    if user["role"] != "worker":
-        return redirect("/rewards", "Only workers request rewards.")
+    if not D.has_perm(user, "reward.request"):
+        return redirect("/rewards", "Only authorised workers request rewards.")
     rw = D.reward(qint(form, "reward_id"))
     if not rw:
         return redirect("/rewards", "Reward not found.")
+    if not rw.get("active", True):
+        return redirect("/rewards", "Reward is not active.")
     if D.user_balance(user["id"]) < rw["point_cost"]:
-        return redirect("/rewards", "Not enough points for that reward.")
-    D.DB["reward_requests"].append({
-        "id": D.next_id("reward_requests"), "ts": D.now_iso(), "user_id": user["id"],
+        return redirect("/rewards", "Not enough available points for that reward.")
+    conflict = next((r for r in D.DB["reward_requests"]
+                     if r["user_id"] == user["id"] and r["reward_id"] == rw["id"]
+                     and r["status"] in D.RESERVED_REWARD_STATUSES), None)
+    if conflict:
+        return redirect("/rewards", "You already have a pending request for this reward.")
+    ok, reason = D.reward_budget_validation(user["dept_key"], rw["cash_value"])
+    if not ok:
+        return redirect("/rewards", reason)
+    auto = rw.get("release_mode") == "automatic"
+    now = D.now_iso()
+    request = {
+        "id": D.next_id("reward_requests"), "ts": now, "user_id": user["id"],
         "dept_key": user["dept_key"], "reward_id": rw["id"], "point_cost": rw["point_cost"],
-        "cash_value": rw["cash_value"], "status": "pending_admin",
+        "cash_value": rw["cash_value"], "status": "released" if auto else "pending_finance",
+        "system_validation_status": "validated",
         "admin_id": None, "admin_ts": None, "finance_id": None, "finance_ts": None,
-        "released_by": None, "released_ts": None,
-        "reject_reason": None, "rejected_by": None, "reject_stage": None, "rejected_ts": None})
+        "released_by": user["id"] if auto else None, "released_ts": now if auto else None,
+        "reject_reason": None, "rejected_by": None, "reject_stage": None, "rejected_ts": None,
+        "release_reference": "AUTO" if auto else None, "auto_release": auto,
+    }
+    D.DB["reward_requests"].append(request)
+    D.record_audit(user, "reward.request", "reward_requests", request["id"],
+                   None, {"status": request["status"], "reserved_points": 0 if auto else rw["point_cost"]})
     D.save()
-    return redirect("/rewards", "Reward requested. Awaiting admin approval.")
+    if auto:
+        return redirect("/rewards", "Reward released automatically and points deducted.")
+    return redirect("/rewards", "Reward requested. Points reserved and sent to Finance.")
 
 
 def _reject(r, user, stage, form):
-    r["status"] = "rejected"
+    r["status"] = "finance_rejected" if stage == "finance" else "rejected"
     r["rejected_by"] = user["id"]
     r["reject_stage"] = stage
     r["reject_reason"] = q1(form, "reason") or "No reason provided."
@@ -1499,58 +1932,70 @@ def _reject(r, user, stage, form):
 
 
 def post_reward_approval(user, form):
-    """Step 2: Admin approves (-> Finance) or rejects with a reason."""
-    if user["role"] not in D.REWARD_APPROVE_ROLES:
-        return redirect("/rewards/approvals", "Not permitted.")
-    r = next((x for x in D.DB["reward_requests"] if x["id"] == qint(form, "id")), None)
-    if not r or r["status"] != "pending_admin":
-        return redirect("/rewards/approvals", "Request not found.")
-    if q1(form, "action") == "approve":
-        r["status"] = "pending_finance"
-        r["admin_id"] = user["id"]
-        r["admin_ts"] = D.now_iso()
-        msg = "Approved by Admin. Sent to the Finance Manager."
-    else:
-        r["admin_id"] = user["id"]
-        r["admin_ts"] = D.now_iso()
-        _reject(r, user, "admin", form)
-        msg = "Request rejected."
-    D.save()
-    return redirect("/rewards/approvals", msg)
+    return redirect("/rewards", "Reward Administrator approval has been removed. Requests go directly to Finance.")
 
 
 def post_reward_finance(user, form):
-    """Steps 3 & 4: Finance approves/rejects, then releases the reward."""
-    if user["role"] not in D.REWARD_RELEASE_ROLES:
+    if not has_any_perm(user, "reward.finance_approve", "reward.finance_reject", "reward.release"):
         return redirect("/rewards/releases", "Not permitted.")
     r = next((x for x in D.DB["reward_requests"] if x["id"] == qint(form, "id")), None)
     if not r:
         return redirect("/rewards/releases", "Request not found.")
     action = q1(form, "action")
-    if action == "fin_approve" and r["status"] == "pending_finance":
+    if action == "fin_approve" and r["status"] in ("pending_finance", "budget_hold", "deferred_next_month", "deferred_next_quarter"):
+        if not D.has_perm(user, "reward.finance_approve"):
+            return redirect("/rewards/releases", "Not permitted.")
         r["status"] = "finance_approved"
         r["finance_id"] = user["id"]
         r["finance_ts"] = D.now_iso()
         msg = "Finance approved. Ready for release."
-    elif action == "reject" and r["status"] == "pending_finance":
+    elif action == "reject" and r["status"] in D.RESERVED_REWARD_STATUSES:
+        if not D.has_perm(user, "reward.finance_reject"):
+            return redirect("/rewards/releases", "Not permitted.")
         r["finance_id"] = user["id"]
         r["finance_ts"] = D.now_iso()
         _reject(r, user, "finance", form)
-        msg = "Request rejected by Finance."
-    elif action == "release" and r["status"] == "finance_approved":
+        msg = "Request rejected by Finance. Reserved points restored."
+    elif action == "hold" and r["status"] == "pending_finance":
+        if not D.has_perm(user, "reward.budget_hold"):
+            return redirect("/rewards/releases", "Not permitted.")
+        r["status"] = "budget_hold"
+        r["finance_id"] = user["id"]
+        r["finance_ts"] = D.now_iso()
+        msg = "Request placed on budget hold."
+    elif action == "defer_month" and r["status"] == "pending_finance":
+        if not D.has_perm(user, "reward.defer"):
+            return redirect("/rewards/releases", "Not permitted.")
+        r["status"] = "deferred_next_month"
+        r["finance_id"] = user["id"]
+        r["finance_ts"] = D.now_iso()
+        msg = "Request deferred to next month."
+    elif action == "defer_quarter" and r["status"] == "pending_finance":
+        if not D.has_perm(user, "reward.defer"):
+            return redirect("/rewards/releases", "Not permitted.")
+        r["status"] = "deferred_next_quarter"
+        r["finance_id"] = user["id"]
+        r["finance_ts"] = D.now_iso()
+        msg = "Request deferred to next quarter."
+    elif action == "release" and r["status"] in ("finance_approved", "budget_hold", "deferred_next_month", "deferred_next_quarter"):
+        if not D.has_perm(user, "reward.release"):
+            return redirect("/rewards/releases", "Not permitted.")
         r["status"] = "released"
         r["released_by"] = user["id"]
         r["released_ts"] = D.now_iso()
+        r["release_reference"] = q1(form, "release_reference") or r.get("release_reference")
         msg = "Reward released. %s charged to the budget." % D.fmt_money(r["cash_value"])
     else:
         msg = "No change."
+    D.record_audit(user, "reward.%s" % action, "reward_requests", r["id"],
+                   None, {"status": r["status"]})
     D.save()
     return redirect("/rewards/releases", msg)
 
 
 def post_budgets(user, form):
-    if not D.can_edit_budget(user["role"]):
-        return redirect("/budgets", "Only the Admin can edit budgets.")
+    if not D.can_edit_budget(user):
+        return redirect("/budgets", "You do not have permission to edit budgets.")
     action = q1(form, "action")
     kind = q1(form, "kind")
     if action in ("lock", "unlock"):
@@ -1591,7 +2036,7 @@ def post_budgets(user, form):
 
 
 def post_admin(user, form):
-    if user["role"] != "admin":
+    if not D.has_perm(user, "user.manage"):
         return redirect("/admin", "Not permitted.")
     action = q1(form, "action")
     if action == "reset_demo":
@@ -1617,7 +2062,7 @@ def csv_points(user, qs):
     entries = list(D.DB["safety_points"])
     if dept:
         entries = [p for p in entries if p["dept_key"] == dept]
-    if user["role"] == "worker":
+    if D.has_role(user, "worker") and not has_any_perm(user, "report.view_department", "report.view_company"):
         entries = [p for p in entries if p["user_id"] == user["id"]]
     entries.sort(key=lambda p: p["ts"], reverse=True)
     out = io.StringIO()
@@ -1770,6 +2215,10 @@ def csv_ai(user, qs):
 # --------------------------------------------------------------------------
 GET_ROUTES = {
     "/": ("Dashboard", body_dashboard),
+    "/hid/request": ("Submit HID Request", body_hid_request_form),
+    "/hid/requests": ("My HID Requests", body_my_hid_requests),
+    "/champion": ("Champion Dashboard", body_champion_dashboard),
+    "/champion/hid-requests": ("Pending Verification", body_champion_hid_requests),
     "/report/observation": ("Report Observation", body_observation_form),
     "/report/hid": ("Hazard / Near-miss", body_hid_form),
     "/report/incident": ("Report Incident", body_incident_form),
@@ -1795,6 +2244,8 @@ GET_ROUTES = {
     "/ai": ("AI Safety Insights", body_ai),
 }
 POST_ROUTES = {
+    "/hid/request": post_hid_request,
+    "/champion/hid-requests": post_champion_hid_requests,
     "/report/observation": post_observation,
     "/report/hid": post_hid,
     "/report/incident": post_incident,
@@ -1818,12 +2269,28 @@ CSV_ROUTES = {
 }
 # Route -> required permission predicate (user -> bool). Absent = any logged-in user.
 ROUTE_GUARDS = {
-    "/review": lambda u: u["role"] in D.REVIEW_ROLES,
-    "/rewards/approvals": lambda u: u["role"] in D.REWARD_APPROVE_ROLES,
-    "/rewards/releases": lambda u: u["role"] in D.REWARD_RELEASE_ROLES,
-    "/reports": lambda u: u["role"] in D.REPORTS_ROLES,
-    "/budgets": lambda u: D.can_view_budget(u["role"]),
-    "/admin": lambda u: u["role"] == "admin",
+    "/hid/request": lambda u: D.has_perm(u, "hid_request.create"),
+    "/hid/requests": lambda u: D.has_perm(u, "hid_request.view_own"),
+    "/champion": lambda u: D.has_perm(u, "hid.create_for_employee"),
+    "/champion/hid-requests": lambda u: D.has_perm(u, "hid.create_for_employee"),
+    "/report/observation": lambda u: D.has_perm(u, "hse.module"),
+    "/report/hid": lambda u: has_any_perm(u, "hid.create_for_employee", "hse.module"),
+    "/report/incident": lambda u: D.has_perm(u, "incident.create"),
+    "/damage": lambda u: D.has_perm(u, "incident.create"),
+    "/review": lambda u: has_any_perm(u, "hid.verify", "hid.approve", "points.process_automatic"),
+    "/actions": lambda u: has_any_perm(u, "action.assign", "action.update_assigned", "action.verify"),
+    "/points": lambda u: has_any_perm(u, "reward.view_eligibility", "report.view_department", "report.view_company"),
+    "/rewards": lambda u: has_any_perm(u, "reward.view_eligibility", "reward.finance_approve"),
+    "/rewards/approvals": lambda u: False,
+    "/rewards/releases": lambda u: has_any_perm(u, "reward.finance_approve", "reward.finance_reject", "reward.release"),
+    "/reports": lambda u: has_any_perm(u, "report.view_department", "report.view_company"),
+    "/budgets": lambda u: D.can_view_budget(u),
+    "/admin": lambda u: has_any_perm(u, "user.manage", "role.manage"),
+    "/hotspots": lambda u: has_any_perm(u, "hse.module", "report.view_company"),
+    "/highpotential": lambda u: has_any_perm(u, "hse.module", "report.view_company"),
+    "/summary": lambda u: has_any_perm(u, "report.view_department", "report.view_company"),
+    "/quality": lambda u: D.has_perm(u, "hse.module"),
+    "/ai": lambda u: has_any_perm(u, "hse.module", "report.view_company"),
 }
 
 
@@ -1857,6 +2324,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(303)
         self.send_header("Location", location)
         self.end_headers()
+
+    def send_forbidden(self, user, path):
+        body = '<div class="empty">%s</div>' % R.esc(ACCESS_DENIED)
+        return self.send_html(R.page("Access Denied", user, body, path), status=403)
 
     def send_csv(self, filename, text):
         data = text.encode("utf-8")
@@ -1896,16 +2367,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_redirect("/login")
 
         if path in CSV_ROUTES:
-            if path == "/reports.csv" and user["role"] not in D.REPORTS_ROLES:
-                return self.send_redirect("/")
+            if path == "/reports.csv" and not has_any_perm(user, "report.view_department", "report.view_company"):
+                return self.send_forbidden(user, path)
+            if path == "/points.csv" and not has_any_perm(user, "reward.view_eligibility", "report.view_department", "report.view_company"):
+                return self.send_forbidden(user, path)
             filename, text = CSV_ROUTES[path](user, qs)
             return self.send_csv(filename, text)
 
         if path in GET_ROUTES:
             guard = ROUTE_GUARDS.get(path)
             if guard and not guard(user):
-                body = '<div class="empty">You do not have access to this module.</div>'
-                return self.send_html(R.page("Not permitted", user, body, path))
+                return self.send_forbidden(user, path)
             title, fn = GET_ROUTES[path]
             body = fn(user, qs)
             return self.send_html(R.page(title, user, body, path, q1(qs, "m", "")))
@@ -1922,9 +2394,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/login":
             uid = qint(form, "user_id")
-            if D.user(uid):
+            login_user = D.user(uid)
+            if login_user:
                 token = secrets.token_urlsafe(24)
                 SESSIONS[token] = uid
+                D.record_audit(login_user, "login", "auth", uid)
+                D.save()
                 self.send_response(303)
                 self.send_header("Location", "/")
                 self.send_header("Set-Cookie", "sid=%s; Path=/; HttpOnly; SameSite=Lax" % token)
@@ -1941,7 +2416,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_redirect("/")
         guard = ROUTE_GUARDS.get(path)
         if guard and not guard(user):
-            return self.send_redirect(path, )
+            return self.send_forbidden(user, path)
         result = handler(user, form)
         if result and result[0] == "redirect":
             return self.send_redirect(result[1])

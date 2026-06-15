@@ -307,13 +307,6 @@ def page(title, user, body, active="/", msg=""):
 
 
 def login_page(users_by_role, msg=""):
-    options = ""
-    for role in D.ROLE_ORDER:
-        people = users_by_role.get(role, [])
-        if not people:
-            continue
-        opts = "".join('<option value="%d">%s</option>' % (u["id"], esc(u["name"])) for u in people)
-        options += '<optgroup label="%s">%s</optgroup>' % (esc(D.role_label(role)), opts)
     brand = adinkra.BRAND_SYMBOL
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/>
@@ -326,18 +319,19 @@ def login_page(users_by_role, msg=""):
   <p>Reward Safety. Reduce Risk. Save Lives.</p></div>
   %(flash)s
   <form method="post" action="/login">
-    <label>Choose a demo user</label>
-    <select name="user_id" required>%(options)s</select>
-    <button type="submit">Enter</button>
+    <label>Employee ID</label>
+    <input name="employee_id" autocomplete="username" required>
+    <label>Password</label>
+    <input name="password" type="password" inputmode="numeric" autocomplete="current-password" required>
+    <button type="submit">Sign in</button>
   </form>
-  <p class="login-note">Demo login &mdash; each user carries explicitly assigned roles.
+  <p class="login-note">Use your Employee ID. The password is the last 4 digits of your phone number.
   Menus and routes are permission-gated for Worker, Champion, Supervisor, HSE,
   Finance, Management and System Administrator demos.</p>
 </div>
 </body></html>""" % {
         "css": CSS,
         "brand": symbol_img(brand["commons_file"], size=56, cls="brand-symbol"),
-        "options": options,
         "flash": flash(msg),
     }
 

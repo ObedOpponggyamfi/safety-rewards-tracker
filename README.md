@@ -37,7 +37,9 @@ file (or use **Admin Tools → Reset demo data**) to reseed a fresh demo.
 
 ## Demo login & roles
 
-Pick any demo user on the sign-in screen — each carries a role:
+Sign in with an Employee ID and a password. The password is the last 4 digits
+of that employee's phone number. Each demo employee carries explicitly assigned
+roles:
 
 - **Worker / Employee** — submit HID requests, view own points, request rewards
 - **Department Safety Champion** — search department employees and convert worker HID requests into official HIDs

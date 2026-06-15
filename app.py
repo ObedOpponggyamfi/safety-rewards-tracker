@@ -1484,6 +1484,7 @@ def body_admin(user, qs):
         <div class="row-inline">
           <div class="field"><label>Full name</label><input name="name" required></div>
           <div class="field"><label>Employee ID</label><input name="employee_id" placeholder="auto if blank"></div>
+          <div class="field"><label>Phone</label><input name="phone" placeholder="password uses last 4 digits"></div>
           <div class="field"><label>Department</label><select name="dept_key">%s</select></div>
           <div class="field"><label>Employment type</label><select name="employment_type"><option>Internal</option><option>Contractor</option></select></div>
         </div>
@@ -2937,7 +2938,8 @@ def post_admin(user, form):
             _apply_employee_profile(
                 rec, name, employment_type, dept_key, contractor_id,
                 (q1(form, "job_title") or D.role_label(role)).strip(),
-                employee_id=employee_id, status="Active",
+                employee_id=employee_id, phone=(q1(form, "phone") or "").strip(),
+                status="Active",
             )
             D.DB["users"].append(rec)
             D.ensure_schema(D.DB)
@@ -3303,10 +3305,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/login":
             if user:
                 return self.send_redirect("/")
-            by_role = {}
-            for u in D.DB["users"]:
-                by_role.setdefault(u["role"], []).append(u)
-            return self.send_html(R.login_page(by_role, q1(qs, "m", "")))
+            return self.send_html(R.login_page({}, q1(qs, "m", "")))
 
         if path == "/logout":
             c = cookies.SimpleCookie(self.headers.get("Cookie", ""))
@@ -3349,12 +3348,14 @@ class Handler(BaseHTTPRequestHandler):
         form = parse_qs(raw)
 
         if path == "/login":
-            uid = qint(form, "user_id")
-            login_user = D.user(uid)
-            if login_user:
+            employee_id = (q1(form, "employee_id") or "").strip()
+            password = (q1(form, "password") or "").strip()
+            login_user = D.employee_by_employee_id(employee_id)
+            if login_user and login_user.get("active", True) and D.valid_login_password(login_user, password):
                 token = secrets.token_urlsafe(24)
-                SESSIONS[token] = uid
-                D.record_audit(login_user, "login", "auth", uid)
+                SESSIONS[token] = login_user["id"]
+                D.record_audit(login_user, "login", "auth", login_user["id"], None,
+                               {"employee_id": login_user.get("employee_id")})
                 D.save()
                 self.send_response(303)
                 self.send_header("Location", "/")
@@ -3362,7 +3363,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            return self.send_redirect("/login?m=Pick+a+user")
+            return self.send_redirect("/login?m=Invalid+Employee+ID+or+password")
 
         user = self.current_user()
         if not user:

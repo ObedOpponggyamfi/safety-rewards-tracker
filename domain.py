@@ -10,6 +10,7 @@ This module owns:
 """
 
 import json
+import hmac
 import os
 import random
 from collections import Counter
@@ -680,6 +681,28 @@ def employee_by_employee_id(employee_id, db=None):
     return None
 
 
+def phone_digits(phone):
+    return "".join(ch for ch in str(phone or "") if ch.isdigit())
+
+
+def default_phone_for_user_id(uid):
+    try:
+        n = int(uid or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return "024%07d" % (1000000 + max(0, n))
+
+
+def login_password_for_user(user):
+    digits = phone_digits(user.get("phone") if user else "")
+    return digits[-4:] if len(digits) >= 4 else ""
+
+
+def valid_login_password(user, password):
+    expected = login_password_for_user(user)
+    return bool(expected) and hmac.compare_digest(str(password or ""), expected)
+
+
 def employee_display_id(u):
     return u.get("employee_id") or ("#%s" % u.get("id", ""))
 
@@ -861,7 +884,7 @@ def _normalise_employee_fields(db):
             "shift": u.get("shift") or "Day",
             "site": u.get("site") or "Asanko Gold Mine",
             "email": u.get("email") or "",
-            "phone": u.get("phone") or "",
+            "phone": u.get("phone") or default_phone_for_user_id(u.get("id")),
             "supervisor_id": u.get("supervisor_id"),
             "safety_champion_id": u.get("safety_champion_id"),
         }

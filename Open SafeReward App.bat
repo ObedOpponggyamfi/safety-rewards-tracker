@@ -7,6 +7,7 @@ title SafeReward App
 
 set "APP_PORT=8090"
 if not "%PORT%"=="" set "APP_PORT=%PORT%"
+set "PORT=%APP_PORT%"
 
 echo.
 echo SafeReward App

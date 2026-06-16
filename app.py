@@ -1452,7 +1452,7 @@ def body_admin_legacy(user, qs):
 
 
 # --------------------------------------------------------------------------
-# Free-tier HSE modules
+# Included HSE modules
 # --------------------------------------------------------------------------
 
 
@@ -1751,7 +1751,7 @@ def body_hotspots(user, qs):
         </form>""" % (th["watch"], th["high"], th["critical"], th["watch"] - 1, th["watch"],
                       th["high"] - 1, th["high"], th["critical"] - 1, th["critical"]))
 
-    banner = R.limit_banner("Showing the top %d hotspot locations; %d more available in Pro." % (cap, hidden)) if hidden else ""
+    banner = R.limit_banner("Showing the top %d hotspot locations; %d additional locations remain available." % (cap, hidden)) if hidden else ""
     pro = R.section("Advanced hotspot analytics", '<div class="grid cols-3">%s%s%s</div>' % (
         R.pro_card("Geographic hotspot maps", "GPS heatmaps, QR location capture & multi-site comparison."),
         R.pro_card("Location risk prediction", "AI predicts emerging hotspots before they escalate."),
@@ -1876,7 +1876,7 @@ def body_summary(user, qs):
     drows = [[R.dept_label_html(r["dept_key"]), r["total"], r["incidents"], r["hids"], r["near_misses"],
               r["high_potential"], r["open_actions"], r["overdue_actions"], r["points"]] for r in ds_shown]
     dept_tbl = R.table(["Department", "Total", "Incidents", "HIDs", "Near Miss", "High-Pot.", "Open", "Overdue", "Points"], drows)
-    dept_banner = R.limit_banner("Free shows %d departments; %d more available in Pro." % (cap_d, ds_hidden)) if ds_hidden else ""
+    dept_banner = R.limit_banner("Showing %d departments in this view; %d additional departments remain available." % (cap_d, ds_hidden)) if ds_hidden else ""
 
     cs = D.contractor_summary(year=yr, month=mo, free=True)
     cap_c = D.FREE_LIMITS["contractors"]
@@ -1884,7 +1884,7 @@ def body_summary(user, qs):
     crows = [[R.esc(r["name"]), r["incidents"], r["hids"], r["near_misses"], r["high_potential"],
               r["damage"], r["open_actions"], r["overdue_actions"]] for r in cs_shown]
     con_tbl = R.table(["Contractor", "Incidents", "HIDs", "Near Miss", "High-Pot.", "Damage", "Open", "Overdue"], crows)
-    con_banner = R.limit_banner("Free shows %d contractors; %d more available in Pro." % (cap_c, cs_hidden)) if cs_hidden else ""
+    con_banner = R.limit_banner("Showing %d contractors in this view; %d additional contractors remain available." % (cap_c, cs_hidden)) if cs_hidden else ""
 
     cc = D.cause_category_counts(year=yr, month=mo, dept=dept, free=True)
     cc_hi = D.cause_category_counts(year=yr, month=mo, free=True, high_only=True)
@@ -1894,7 +1894,7 @@ def body_summary(user, qs):
     pro = R.section("Advanced summary tools", '<div class="grid cols-3">%s%s%s</div>' % (
         R.pro_card("Contractor scorecards", "Monthly & quarterly contractor ranking."),
         R.pro_card("Frequency rates", "LTIFR / TRIFR with man-hours integration."),
-        R.pro_card("Unlimited departments", "Beyond the Free 2-department / 3-contractor cap.")))
+        R.pro_card("Unlimited departments", "Full department and contractor views are included.")))
     return (controls + R.section("Department safety summary", dept_banner + dept_tbl)
             + R.section("Contractor safety summary", con_banner + con_tbl) + causes + pro)
 
@@ -1908,7 +1908,7 @@ def body_quality(user, qs):
         R.stat_card("Awaiting correction", dq["awaiting"]))
     rows = [[R.esc(s["kind"]), "#%s" % s["id"], R.esc(s["issue"])] for s in dq["samples"]]
     table = R.table(["Record", "ID", "Issue"], rows, "No outstanding data-quality issues.")
-    rules = R.section("Validation rules (Free)", """<div class="card"><ul style="margin:0;padding-left:18px;line-height:1.9">
+    rules = R.section("Validation rules", """<div class="card"><ul style="margin:0;padding-left:18px;line-height:1.9">
       <li>Required fields (location, description) must be completed before submission.</li>
       <li>A Near Miss should not record a serious actual injury — reclassify as an Incident.</li>
       <li>A Lost Time Injury must include lost work days.</li>
@@ -1924,26 +1924,28 @@ def body_quality(user, qs):
 
 
 def body_pro(user, qs):
-    L = D.FREE_LIMITS
     limit_rows = [
-        ["Companies", "1", "Unlimited"], ["Sites", "1", "Multi-site"],
-        ["Locations", str(L["locations"]), "Unlimited"], ["Departments", str(L["departments"]), "Unlimited"],
-        ["Contractors", str(L["contractors"]), "Unlimited"], ["Employees", str(L["employees"]), "Unlimited"],
-        ["SafePay Champions", str(L["champions"]), "Unlimited"],
-        ["Records / month", str(L["records_per_month"]), "Unlimited"],
-        ["History", "Current month + %d days" % L["history_days"], "Unlimited"],
-        ["Export", "CSV only", "CSV · Excel · PDF · Power BI"],
+        ["Companies", "Included", "1 company demo"],
+        ["Sites", "Included", "1 site demo"],
+        ["Locations", "Included", "No app cap"],
+        ["Departments", "Included", "All official departments"],
+        ["Contractors", "Included", "Full contractor register"],
+        ["Employees", "Included", "700+ workforce supported"],
+        ["SafePay Champions", "Included", "Department champions supported"],
+        ["Records / month", "Included", "No monthly record block"],
+        ["History", "Included", "Full available history"],
+        ["Export", "Included", "CSV exports and generated workbook artifacts"],
     ]
-    limits = R.section("Free plan limits", R.table(["Capability", "Free", "Pro / Enterprise"], limit_rows))
+    limits = R.section("Included access", R.table(["Capability", "Status", "Scope"], limit_rows))
     cards = "".join(R.pro_card(name) for name in D.PRO_FEATURES)
-    locked = R.section("Available in Pro & Enterprise", '<div class="grid cols-3">%s</div>' % cards)
-    cta = ('<div class="card" style="text-align:center"><h3 style="margin:0 0 6px">Upgrade Safety Pays</h3>'
-           '<p class="hint">Unlock AI analytics, unlimited history, investigation workflows, frequency rates, '
-           'maps and enterprise controls.</p><a class="btn gold" href="/pro">Talk to us about Pro</a></div>')
-    intro = ('<p class="hint">You are on the <strong>%s</strong> plan. Existing data is never deleted when a limit is reached. '
+    included = R.section("Included advanced capabilities", '<div class="grid cols-3">%s</div>' % cards)
+    cta = ('<div class="card" style="text-align:center"><h3 style="margin:0 0 6px">All Safety Pays Features Included</h3>'
+           '<p class="hint">Advanced analytics, full-history views, investigation workflow prompts, '
+           'frequency-rate planning, map placeholders and enterprise controls are available in this build.</p></div>')
+    intro = ('<p class="hint">You are on the <strong>%s</strong> plan. Existing data is never deleted or blocked by plan limits. '
              '<span class="included-badge">%s</span> &middot; <strong>%s</strong>.</p>'
              % (D.PLAN, R.esc(D.AI_FREE_LABEL), R.esc(D.AI_PRO_LABEL)))
-    return intro + cta + limits + locked
+    return intro + cta + limits + included
 
 
 def body_ai(user, qs):
@@ -2155,8 +2157,7 @@ def _hse_from_form(rec, form, kind):
 
 
 def _limit_msg():
-    return ("Free plan limit: %d records this month reached. Existing data is kept — "
-            "upgrade to Pro for unlimited records." % D.FREE_LIMITS["records_per_month"])
+    return "All access is enabled; record limits are not enforced."
 
 
 def post_notifications(user, form):
@@ -3173,7 +3174,7 @@ GET_ROUTES = {
     "/damage": ("Property / Equipment Damage", body_damage),
     "/summary": ("Dept & Contractor Summary", body_summary),
     "/quality": ("Data Quality", body_quality),
-    "/pro": ("Upgrade to Pro", body_pro),
+    "/pro": ("Included Features", body_pro),
     "/ai": ("AI Safety Insights", body_ai),
 }
 POST_ROUTES = {

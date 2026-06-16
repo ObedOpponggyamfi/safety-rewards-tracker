@@ -132,7 +132,7 @@ def reward_trail(r):
     return '<div class="trail-row">%s</div>' % "".join(parts) if parts else ""
 
 
-# -- Charts, risk/hotspot badges, Pro-locked cards (Free Version) --
+# -- Charts, risk/hotspot badges, included feature cards --
 
 
 def bar_chart(rows, unit=""):
@@ -164,19 +164,18 @@ def risk_badge(level):
 
 
 def pro_badge():
-    return '<span class="pro-badge">Available in Pro</span>'
+    return '<span class="included-badge">Included</span>'
 
 
 def pro_card(title, desc=""):
-    return ('<div class="card pro-locked"><div class="pro-top"><span class="pro-lock">🔒</span>%s</div>'
-            '<h3>%s</h3><div class="hint">%s</div>'
-            '<a class="btn gold sm" href="/pro">Upgrade</a></div>'
+    return ('<div class="card included-feature"><div class="pro-top">%s</div>'
+            '<h3>%s</h3><div class="hint">%s</div></div>'
             % (pro_badge(), esc(title), esc(desc)))
 
 
 def limit_banner(text):
-    return ('<div class="limit-banner"><strong>Free plan limit.</strong> %s '
-            '<a href="/pro">See Pro &rarr;</a></div>' % esc(text))
+    return ('<div class="limit-banner"><strong>All access included.</strong> %s</div>'
+            % esc(text))
 
 
 # -- AI Safety Prediction --
@@ -498,6 +497,8 @@ textarea{min-height:84px;resize:vertical}
 .bar-val{flex:0 0 60px;color:var(--muted);font-weight:600}
 .pro-locked{position:relative;border-style:dashed;background:#fbfaf6}
 .pro-locked h3{margin:6px 0 4px;font-size:15px;color:var(--navy)}
+.included-feature{position:relative;border-color:#b8dfca;background:#f7fcf9}
+.included-feature h3{margin:6px 0 4px;font-size:15px;color:var(--navy)}
 .pro-top{display:flex;justify-content:space-between;align-items:center}
 .pro-lock{font-size:18px;opacity:.7}
 .pro-badge{display:inline-block;background:var(--gold-soft);color:#6a5410;font-size:11px;font-weight:700;padding:2px 9px;border-radius:20px}

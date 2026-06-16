@@ -180,12 +180,12 @@ symbol files were verified to resolve from Commons.
 
 ---
 
-## Free-tier HSE modules (Safety Pays Free)
+## Included HSE modules (All Access)
 
-This build is the **Free Version** of Safety Pays. It gives basic HSE visibility;
-advanced analytics, AI, unlimited history, automation and enterprise controls are
-reserved for Pro / Enterprise and shown as locked **"Available in Pro"** cards with
-an upgrade page at `/pro`.
+This build is the **All Access** version of Safety Pays. Core HSE visibility,
+advanced analytics, AI, full-history views, workflow prompts and enterprise
+controls are available without a Pro lock. The `/pro` route is retained as an
+included-features page for users who already know that path.
 
 - **Location Hotspots** (`/hotspots`) — reports by location/sub-location, top-5
   ranking, per-type counts, open/overdue actions, highest risk, and a hotspot
@@ -195,8 +195,8 @@ an upgrade page at `/pro`.
   consequence is Major/Catastrophic, the risk is Critical, or a reviewer flags it.
 - **Actual vs Potential consequence** on every report (Insignificant → Catastrophic),
   with a "Low actual / high potential" focus card.
-- **Dept & Contractor Summary** (`/summary`) — basic counts (Free shows 11 departments
-  / 33 contractors) plus cause-category charts.
+- **Dept & Contractor Summary** (`/summary`) — counts across official departments
+  and the full contractor register, plus cause-category charts.
 - **Cause categories** — one controlled master value each (no duplicate variants).
 - **Property / Equipment Damage** (`/damage`) — damage type, asset, cost range,
   downtime, repair status.
@@ -209,14 +209,12 @@ an upgrade page at `/pro`.
   activities, contractors and causes 0–100 (Low / Moderate / High / Critical) with a
   **fully explainable "because it recorded …"** rationale, recommended action and
   confidence on every prediction. Weekly/monthly with 8 filters, overdue-action and
-  repeat-hazard alerts, a minimum-data guard, and an advisory disclaimer. Heavy ML,
-  telemetry, multi-site forecasting and alerting are locked as **"Advanced AI Risk
-  Forecasting — Pro"**.
+  repeat-hazard alerts, a minimum-data guard, and an advisory disclaimer. Advanced
+  AI risk forecasting is also marked as included in the app.
 
-**Free limits** (existing data is never deleted when a limit is reached — a clear
-upgrade message is shown instead): 1 company · 1 site · 5 locations · 11 departments ·
-33 contractors · 700 employees · 55 SafePay Champions (5 per department) ·
-100 records per month · current month + 90 days of detailed history · CSV export only.
+**All-access demo scope**: 1 company, 1 site, all official departments, the full
+contractor register, 700+ employees, department SafePay Champions, unrestricted
+record entry for the demo, full available history and CSV/workbook-ready exports.
 
 ---
 

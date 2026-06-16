@@ -99,7 +99,7 @@ ROLE_PERMISSIONS = {
 NAV_ITEMS = [
     {"group": "Overview", "label": "My Dashboard", "route": "/", "icon": "home",
      "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 10},
-    {"group": "Overview", "label": "Upgrade to Pro", "route": "/pro", "icon": "lock",
+    {"group": "Overview", "label": "Included Features", "route": "/pro", "icon": "sparkles",
      "required_permission": None, "allowed_roles": ROLE_ORDER, "display_order": 90},
     {"group": "Overview", "label": "Notifications", "route": "/notifications", "icon": "bell",
      "required_permission": "notification.view_own", "allowed_roles": ROLE_ORDER, "display_order": 80},
@@ -270,13 +270,13 @@ MONTHS = [
 ]
 
 # --------------------------------------------------------------------------
-# Plan tiering (this build is the Free Version)
+# Plan tiering (all features are included in this build)
 # --------------------------------------------------------------------------
-PLAN = "Free"
+PLAN = "All Access"
 FREE_LIMITS = {
-    "company": 1, "site": 1, "locations": 5, "departments": 11,
-    "contractors": 33, "employees": 700, "champions": 55, "champions_per_dept": 5,
-    "records_per_month": 100, "history_days": 90,
+    "company": 1, "site": 1, "locations": 100000, "departments": 100000,
+    "contractors": 100000, "employees": 100000, "champions": 100000,
+    "champions_per_dept": 5, "records_per_month": 1000000, "history_days": 36500,
 }
 
 INVALID_CONTRACTOR_NAMES = {"not stated", "n/a", "asanko"}
@@ -347,7 +347,7 @@ CONTRACTOR_MASTER_SEED = [
     ("ZEN", "ZEN", "Supply services", "finance_supply_chain", 5),
 ]
 
-# Advanced capabilities reserved for paid tiers (rendered as locked cards).
+# Advanced capabilities rendered as included cards.
 PRO_FEATURES = [
     "AI Hazard Fingerprint", "AI Duplicate HID Detection", "Geographic hotspot maps",
     "GPS & QR location capture", "Advanced AI Risk Forecasting", "Unlimited location history",
@@ -413,9 +413,9 @@ AI_MIN_ENTITY = 3     # records needed for a single entity prediction
 AI_DISCLAIMER = ("AI predictions support HSE decision-making and do not replace professional "
                  "judgement, inspections, investigations, or legal compliance requirements.")
 AI_FREE_LABEL = "Basic AI Safety Prediction — Included"
-AI_PRO_LABEL = "Advanced AI Risk Forecasting — Pro"
+AI_PRO_LABEL = "Advanced AI Risk Forecasting — Included"
 
-# Advanced capabilities reserved for paid tiers (shown as locked cards on /ai).
+# Advanced capabilities shown as included cards on /ai.
 AI_PRO_FEATURES = [
     "Machine-learning model training on multi-year data", "Custom company-specific models",
     "Real-time telemetry prediction", "Weather & environmental integration",
@@ -506,12 +506,12 @@ def fmt_money(amount):
 
 
 def history_cutoff():
-    """Earliest date the Free Version shows in detail (last 90 days)."""
+    """Earliest detailed-history date for the current all-access configuration."""
     return today() - timedelta(days=FREE_LIMITS["history_days"])
 
 
 def within_free_history(ts):
-    """Free history = current month plus the previous 90 days."""
+    """Return whether a timestamp falls within the configured history window."""
     d = parse_dt(ts).date()
     t = today()
     return (d.year == t.year and d.month == t.month) or d >= history_cutoff()
@@ -2144,7 +2144,7 @@ def records_this_month():
 
 
 def at_record_limit():
-    return records_this_month() >= FREE_LIMITS["records_per_month"]
+    return False
 
 
 def validate_record(kind, data):

@@ -84,7 +84,7 @@ ROLE_PERMISSIONS = {
     "worker": set(_EARN),
     "champion": _EARN | {"hid.create_for_employee", "report.view_department"},
     "supervisor": _EARN | {"hid.verify", "action.update_assigned", "report.view_department", "hse.module"},
-    "hse_officer": _BASE | set(_HSE_CREATE) | {"points.adjust_request"},
+    "hse_officer": _BASE | set(_HSE_CREATE) | {"points.adjust_request", "report.view_company"},
     "hse_manager": _HSE_CREATE | {"hid.approve", "hid.reject", "incident.approve",
         "investigation.approve", "points.process_automatic", "points.adjust_authorised",
         "points.adjust_request", "points.adjust_approve", "lti.reset", "report.view_company",

@@ -11,6 +11,7 @@ import io
 import os
 import secrets
 import socket
+import time
 import webbrowser
 from collections import Counter
 from http import cookies
@@ -24,6 +25,9 @@ import render as R
 
 PORT = int(os.environ.get("PORT", "8090"))
 SESSIONS = {}  # token -> user_id
+LOGIN_ATTEMPTS = {}  # login key -> failed attempt timestamps
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_WINDOW_SECONDS = 10 * 60
 
 
 # --------------------------------------------------------------------------
@@ -78,12 +82,77 @@ def adjustment_status_badge(status):
     return R.badge(status.replace("_", " ").title(), kind)
 
 
+def _login_key(employee_id, remote_addr):
+    return "%s|%s" % ((employee_id or "").strip().casefold(), remote_addr or "")
+
+
+def _login_attempts(key):
+    now = time.time()
+    attempts = [ts for ts in LOGIN_ATTEMPTS.get(key, []) if now - ts < LOGIN_WINDOW_SECONDS]
+    if attempts:
+        LOGIN_ATTEMPTS[key] = attempts
+    else:
+        LOGIN_ATTEMPTS.pop(key, None)
+    return attempts
+
+
+def _login_blocked(key):
+    return len(_login_attempts(key)) >= MAX_LOGIN_ATTEMPTS
+
+
+def _record_failed_login(key):
+    LOGIN_ATTEMPTS[key] = _login_attempts(key) + [time.time()]
+
+
+def _clear_login_attempts(key):
+    LOGIN_ATTEMPTS.pop(key, None)
+
+
+def _hse_dashboard_scope(user):
+    if has_any_perm(user, "report.view_company"):
+        return True, None, "Company HSE overview"
+    if has_any_perm(user, "report.view_department", "hse.module"):
+        return True, user.get("dept_key"), "%s HSE overview" % D.dept_name(user.get("dept_key"))
+    return False, None, ""
+
+
+def _scoped_dept(user, requested=None):
+    requested = D.department_key_from_value(requested or "", default="") or ""
+    if has_any_perm(user, "report.view_company"):
+        return requested or None
+    if has_any_perm(user, "report.view_department", "hse.module"):
+        return user.get("dept_key")
+    return requested or None
+
+
+def _dept_opts_for_user(user, selected=None):
+    if has_any_perm(user, "report.view_company"):
+        return _dept_opts(selected)
+    dept_key = user.get("dept_key")
+    items = [(dept_key, D.dept_name(dept_key))] if D.department(dept_key) else []
+    return _opts(items, dept_key, None)
+
+
+def _open_actions_for_scope(dept_key=None):
+    actions = [a for a in D.DB["corrective_actions"] if a["status"] == "open"]
+    if dept_key:
+        actions = [a for a in actions if a.get("dept_key") == dept_key]
+    return actions
+
+
+def _low_actual_high_potential_count(reports):
+    return sum(1 for r in reports
+               if r["rec"].get("actual_consequence") in ("Insignificant", "Minor", "Moderate")
+               and r["rec"].get("potential_consequence") in ("Major", "Catastrophic"))
+
+
 # --------------------------------------------------------------------------
 # Page bodies
 # --------------------------------------------------------------------------
 
 
-def body_dashboard(user, qs):
+def body_dashboard_legacy(user, qs):
+    return body_dashboard(user, qs)
     yr, mo = D.today().year, D.today().month
     q = D.quarter_of_month(mo)
     pending_reviews = len([o for o in D.DB["safety_observations"] if o["status"] == "submitted"])
@@ -210,6 +279,136 @@ def body_dashboard(user, qs):
 
     league_preview = league_table(year=yr, month=mo, limit=3)
     preview = R.section("Adinkra League · top departments this month", league_preview,
+                        actions='<a class="btn sm ghost" href="/league">Full league</a>')
+
+    return top + personal + todo_html + dept_html + preview
+
+
+def body_dashboard(user, qs):
+    yr, mo = D.today().year, D.today().month
+    pending_reviews = len([o for o in D.DB["safety_observations"] if o["status"] == "submitted"])
+    today_iso = D.today().isoformat()
+    can_hse, scoped_dept, hse_title = _hse_dashboard_scope(user)
+
+    top = ""
+    if can_hse:
+        reps = D._norm_reports(dept=scoped_dept, free=True)
+        n = lambda rt: sum(1 for r in reps if r["rtype"] == rt)
+        open_actions = _open_actions_for_scope(scoped_dept)
+        overdue = [a for a in open_actions if a.get("due") and a["due"] < today_iso]
+        hotspots = D.location_hotspots(dept=scoped_dept, free=True)
+        causes = D.cause_category_counts(dept=scoped_dept, free=True)
+        lahp = _low_actual_high_potential_count(reps)
+        top_loc = ("%s (%d)" % (hotspots[0]["location"], hotspots[0]["total"])) if hotspots else "-"
+        top_cause = causes.most_common(1)[0][0] if causes else "-"
+        scope_card = (R.stat_card("Data Completeness", "%d%%" % D.data_quality(free=True)["completeness"])
+                      if scoped_dept is None else R.stat_card("Records in Scope", len(reps), D.dept_name(scoped_dept)))
+
+        top = R.section("%s - current history" % hse_title,
+            '<div class="grid cols-4">%s%s%s%s</div><div style="height:14px"></div>'
+            '<div class="grid cols-4">%s%s%s%s</div><div style="height:14px"></div>'
+            '<div class="grid cols-4">%s%s%s%s</div>' % (
+                R.stat_card("Total Incidents", n("incident")),
+                R.stat_card("Total HIDs", n("hid")),
+                R.stat_card("Total Near Misses", n("near_miss")),
+                R.stat_card("Total Observations", n("observation")),
+                R.stat_card("High-Potential Events", sum(1 for r in reps if r["high_potential"])),
+                R.stat_card("Property / Equipment Damage", n("damage")),
+                R.stat_card("Open Corrective Actions", len(open_actions)),
+                R.stat_card("Overdue Corrective Actions", len(overdue)),
+                R.stat_card("Top Hotspot Location", top_loc),
+                R.stat_card("Top Cause Category", top_cause),
+                R.stat_card("Low Actual / High Potential", lahp),
+                scope_card))
+
+        by_loc = Counter(r["location"] for r in reps)
+        by_risk = Counter(r["risk_level"] or "Unspecified" for r in reps)
+        by_dept = Counter(D.dept_name(r["dept_key"]) for r in reps)
+        actual_dist = Counter(r["rec"].get("actual_consequence") or "-" for r in reps)
+        potential_dist = Counter(r["rec"].get("potential_consequence") or "-" for r in reps)
+        ordered = lambda c, order: [(k, c.get(k, 0)) for k in order if c.get(k, 0)]
+        top += ('<div class="grid cols-2">%s%s</div>' % (
+                    R.section("Reports by location", R.bar_chart(by_loc.most_common(8))),
+                    R.section("Reports by risk level", R.bar_chart(ordered(by_risk, D.RISK_LEVELS) or by_risk.most_common())))
+                + '<div class="grid cols-2">%s%s</div>' % (
+                    R.section("Reports by department", R.bar_chart(by_dept.most_common(8))),
+                    R.section("Top cause categories", R.bar_chart(causes.most_common(5))))
+                + '<div class="grid cols-2">%s%s</div>' % (
+                    R.section("Actual consequences", R.bar_chart(ordered(actual_dist, D.CONSEQUENCES))),
+                    R.section("Potential consequences", R.bar_chart(ordered(potential_dist, D.CONSEQUENCES)))))
+
+        if has_any_perm(user, "hse.module", "report.view_company"):
+            ai = D.ai_predict(dept=scoped_dept, free=True)
+            if ai["ok"]:
+                first = lambda l: l[0] if l else None
+
+                def mini(title, pred):
+                    if not pred:
+                        return R.stat_card(title, "-", "insufficient data")
+                    return R.stat_card(title, "%s - %d" % (pred["risk_level"], pred["risk_score"]), pred["entity_name"])
+
+                n_hp = len(D.high_potential_events(dept=scoped_dept, free=True))
+                ai_cards = ('<div class="grid cols-4">%s%s%s%s</div><div style="height:14px"></div>'
+                            '<div class="grid cols-4">%s%s%s%s</div><div style="height:14px"></div>'
+                            '<div class="grid cols-2">%s%s</div>' % (
+                                mini("Highest Risk Location", first(ai["locations"])),
+                                mini("Highest Risk Department", first(ai["departments"])),
+                                mini("Highest Risk Activity", first(ai["activities"])),
+                                mini("Equipment Requiring Attention", first(ai["equipment"])),
+                                mini("Contractor Risk Alert", first(ai["contractors"])),
+                                R.stat_card("Corrective Action Overdue Risk", "%d flagged" % len(overdue), "scoped overdue actions"),
+                                mini("Repeat Hazard Alert", first(ai["repeat_hazards"])),
+                                R.stat_card("High-Potential Event Alert", "%d events" % n_hp, ai["period_label"]),
+                                mini("Predicted Risk - %s" % ai["period_label"], ai["overall"]),
+                                R.stat_card("Recommended Immediate Action", ai["top"]["risk_level"], ai["top"]["recommended_action"])))
+                top += R.section("AI Safety Prediction - %s" % ai["period_label"],
+                                 ai_cards + '<div class="pill-row" style="margin-top:12px"><a class="btn gold" href="/ai">Open AI Safety Insights &rarr;</a></div>')
+
+    personal = ""
+    if D.has_role(user, "worker"):
+        bal = D.user_balance(user["id"])
+        reserved = D.reserved_points(user["id"])
+        mpts = D.user_points(user["id"], year=yr, month=mo)
+        personal = R.section("My safety points",
+            '<div class="grid cols-3">%s%s%s</div>' % (
+                R.stat_card("Spendable balance", "%d pts" % bal),
+                R.stat_card("Reserved", "%d pts" % reserved, "pending reward requests"),
+                R.stat_card("Earned this month", "%d pts" % mpts, "%s %d" % (D.month_name(mo), yr)),
+            ))
+
+    dept = D.department(user["dept_key"])
+    dept_html = ""
+    if dept:
+        limit = D.dept_monthly_limit(dept)
+        used = D.dept_budget_used(dept["key"], yr, mo)
+        pts = D.dept_points(dept["key"], year=yr, month=mo)
+        dept_html = R.section("My department",
+            '<div class="card adinkra-card">%s<div class="adinkra-meta">'
+            '<h3>%s</h3><div class="kpi-mini">%s</div><div class="meaning">%s</div><div class="motto">%s</div>'
+            '<div class="hint" style="margin-top:8px">Points this month: <strong>%d</strong> &middot; '
+            'Active employees: <strong>%d</strong> &middot; Monthly limit: <strong>%s</strong> &middot; '
+            'Used: <strong>%s</strong></div></div></div>' % (
+                R.symbol_img(dept["commons_file"], 84), R.esc(dept["adinkra_name"]),
+                R.esc(dept.get("department", "")), R.esc(dept["meaning"]), R.esc(dept["motto"]), pts,
+                dept["active_employees"], D.fmt_money(limit), D.fmt_money(used)))
+
+    todo = []
+    if has_any_perm(user, "hid.verify", "hid.approve", "points.process_automatic") and pending_reviews:
+        todo.append('<a class="btn gold" href="/review">Review queue (%d)</a>' % pending_reviews)
+    if D.has_perm(user, "reward.finance_approve"):
+        fin = len([r for r in D.DB["reward_requests"]
+                   if r["status"] in ("pending_finance", "finance_approved")])
+        if fin:
+            todo.append('<a class="btn gold" href="/rewards/releases">Finance queue (%d)</a>' % fin)
+    if D.has_perm(user, "hid_request.create"):
+        todo.append('<a class="btn" href="/hid/request">Submit HID request</a>')
+    elif D.has_perm(user, "hse.module"):
+        todo.append('<a class="btn" href="/report/observation">Report an observation</a>')
+    todo.append('<a class="btn ghost" href="/league">Adinkra League</a>')
+    todo_html = R.section("Quick actions", '<div class="pill-row">%s</div>' % "".join(todo))
+
+    league_preview = league_table(year=yr, month=mo, limit=3)
+    preview = R.section("Adinkra League - top departments this month", league_preview,
                         actions='<a class="btn sm ghost" href="/league">Full league</a>')
 
     return top + personal + todo_html + dept_html + preview
@@ -1695,7 +1894,7 @@ def _dept_opts(selected=None):
 
 def body_hotspots(user, qs):
     f = dict(year=qint(qs, "year", D.today().year), month=qint(qs, "month") or None,
-             dept=q1(qs, "dept") or None, location=q1(qs, "location") or None,
+             dept=_scoped_dept(user, q1(qs, "dept") or None), location=q1(qs, "location") or None,
              report_type=q1(qs, "report_type") or None, risk_level=q1(qs, "risk_level") or None)
     rows = D.location_hotspots(free=True, **f)
     cap = D.FREE_LIMITS["locations"]
@@ -1713,7 +1912,7 @@ def body_hotspots(user, qs):
       <div class="field"><label>Risk level</label><select name="risk_level">%s</select></div>
       <button class="btn">Apply</button>
       <a class="btn ghost" href="/hotspots.csv?%s">Export CSV</a>
-    </form>""" % (mo_opts, f["year"], _dept_opts(f["dept"]),
+    </form>""" % (mo_opts, f["year"], _dept_opts_for_user(user, f["dept"]),
                   _opts([(l, l) for l in D.location_options()], f["location"], "All locations"),
                   _opts([(k, v[0]) for k, v in D.REPORT_TYPES.items()], f["report_type"], "All report types"),
                   _opts([(r, r) for r in D.RISK_LEVELS], f["risk_level"], "All risk levels"),
@@ -1764,7 +1963,7 @@ def body_hotspots(user, qs):
 def body_highpotential(user, qs):
     yr = qint(qs, "year", D.today().year)
     mo = qint(qs, "month") or None
-    dept = q1(qs, "dept") or None
+    dept = _scoped_dept(user, q1(qs, "dept") or None)
     evts = D.high_potential_events(year=yr, month=mo, dept=dept, free=True)
     total = len(evts)
     open_e = sum(1 for e in evts if e["rec"].get("status") in ("open", "under_review", "submitted"))
@@ -1778,7 +1977,7 @@ def body_highpotential(user, qs):
       <div class="field"><label>Month</label><select name="month">%s</select></div>
       <div class="field"><label>Year</label><input name="year" value="%d" style="width:80px"></div>
       <div class="field"><label>Department</label><select name="dept">%s</select></div>
-      <button class="btn">Apply</button></form>""" % (mo_opts, yr, _dept_opts(dept))
+      <button class="btn">Apply</button></form>""" % (mo_opts, yr, _dept_opts_for_user(user, dept))
 
     cards = '<div class="grid cols-4">%s%s%s%s</div>' % (
         R.stat_card("High-Potential Events", total), R.stat_card("Open", open_e),
@@ -1859,7 +2058,7 @@ def body_damage(user, qs):
 def body_summary(user, qs):
     yr = qint(qs, "year", D.today().year)
     mo = qint(qs, "month") or None
-    dept = q1(qs, "dept") or None
+    dept = _scoped_dept(user, q1(qs, "dept") or None)
     mo_opts = '<option value="">Last 90 days</option>' + "".join(
         '<option value="%d"%s>%s</option>' % (m, " selected" if m == mo else "", D.month_name(m)) for m in range(1, 13))
     controls = """<form class="filter-bar" method="get">
@@ -1868,9 +2067,11 @@ def body_summary(user, qs):
       <div class="field"><label>Department (cause filter)</label><select name="dept">%s</select></div>
       <button class="btn">Apply</button>
       <a class="btn ghost" href="/summary.csv?%s">Export CSV</a></form>""" % (
-        mo_opts, yr, _dept_opts(dept), urlencode({"year": yr, "month": mo or "", "dept": dept or ""}))
+        mo_opts, yr, _dept_opts_for_user(user, dept), urlencode({"year": yr, "month": mo or "", "dept": dept or ""}))
 
     ds = D.dept_summary(year=yr, month=mo, free=True)
+    if dept:
+        ds = [r for r in ds if r["dept_key"] == dept]
     cap_d = D.FREE_LIMITS["departments"]
     ds_shown, ds_hidden = ds[:cap_d], max(0, len(ds) - cap_d)
     drows = [[R.dept_label_html(r["dept_key"]), r["total"], r["incidents"], r["hids"], r["near_misses"],
@@ -1879,6 +2080,10 @@ def body_summary(user, qs):
     dept_banner = R.limit_banner("Showing %d departments in this view; %d additional departments remain available." % (cap_d, ds_hidden)) if ds_hidden else ""
 
     cs = D.contractor_summary(year=yr, month=mo, free=True)
+    if dept:
+        dept_companies = {u.get("company_id") for u in D.DB["users"]
+                          if u.get("dept_key") == dept and u.get("company_id")}
+        cs = [r for r in cs if r.get("company_id") in dept_companies]
     cap_c = D.FREE_LIMITS["contractors"]
     cs_shown, cs_hidden = cs[:cap_c], max(0, len(cs) - cap_c)
     crows = [[R.esc(r["name"]), r["incidents"], r["hids"], r["near_misses"], r["high_potential"],
@@ -1887,7 +2092,7 @@ def body_summary(user, qs):
     con_banner = R.limit_banner("Showing %d contractors in this view; %d additional contractors remain available." % (cap_c, cs_hidden)) if cs_hidden else ""
 
     cc = D.cause_category_counts(year=yr, month=mo, dept=dept, free=True)
-    cc_hi = D.cause_category_counts(year=yr, month=mo, free=True, high_only=True)
+    cc_hi = D.cause_category_counts(year=yr, month=mo, dept=dept, free=True, high_only=True)
     causes = '<div class="grid cols-2">%s%s</div>' % (
         R.section("Top 5 cause categories", R.bar_chart(cc.most_common(5))),
         R.section("Cause categories — high-potential events", R.bar_chart(cc_hi.most_common(5))))
@@ -1953,9 +2158,15 @@ def body_ai(user, qs):
     yr = qint(qs, "year", D.today().year)
     mo = qint(qs, "month", D.today().month)
     week = qint(qs, "week")
-    dept = q1(qs, "dept") or None
+    dept = _scoped_dept(user, q1(qs, "dept") or None)
     loc = q1(qs, "location") or None
     contractor = q1(qs, "contractor") or None
+    dept_contractors = None
+    if dept:
+        dept_contractors = {u.get("company_id") for u in D.DB["users"]
+                            if u.get("dept_key") == dept and u.get("company_id")}
+        if contractor and D.contractor_id_from_value(contractor) not in dept_contractors:
+            contractor = None
     equipment = q1(qs, "equipment") or None
     activity = q1(qs, "activity") or None
     res = D.ai_predict(year=yr, month=mo, period=period, week=week, dept=dept, location=loc,
@@ -1982,8 +2193,9 @@ def body_ai(user, qs):
       <a class="btn ghost" href="/ai.csv?%s">Export CSV</a>
     </form>""" % (period, R.month_select("month", mo, onchange=False), yr,
                   _opts([(w, "Week %d" % w) for w in range(1, 6)], week, "Auto"),
-                  _dept_opts(dept), _opts([(l, l) for l in D.location_options()], loc, "All locations"),
-                  _opts([(c["id"], c["name"]) for c in D.DB["companies"]], contractor, "All contractors"),
+                  _dept_opts_for_user(user, dept), _opts([(l, l) for l in D.location_options()], loc, "All locations"),
+                  _opts([(c["id"], c["name"]) for c in D.DB["companies"]
+                         if dept_contractors is None or c["id"] in dept_contractors], contractor, "All contractors"),
                   _opts([(e, e) for e in D.EQUIPMENT], equipment, "All equipment"),
                   _opts([(a, a) for a in D.ACTIVITIES], activity, "All activities"), urlencode(qsd))
     disclaimer = R.ai_disclaimer()
@@ -2881,18 +3093,20 @@ def post_admin(user, form):
         skipped = []
         for emp in targets:
             dept_key = new_dept or emp.get("dept_key")
-            if new_dept:
-                emp["dept_key"] = dept_key
-                emp["department_id"] = dept_key
             if supervisor:
                 if supervisor.get("dept_key") != dept_key:
                     skipped.append(D.employee_display_id(emp))
                     continue
-                emp["supervisor_id"] = supervisor["id"]
             if champion:
                 if not D.has_role(champion, "champion") or champion.get("dept_key") != dept_key:
                     skipped.append(D.employee_display_id(emp))
                     continue
+            if new_dept:
+                emp["dept_key"] = dept_key
+                emp["department_id"] = dept_key
+            if supervisor:
+                emp["supervisor_id"] = supervisor["id"]
+            if champion:
                 emp["safety_champion_id"] = champion["id"]
             if new_status:
                 _set_status_fields(emp, new_status)
@@ -3088,7 +3302,7 @@ def csv_reports(user, qs):
 
 def csv_hotspots(user, qs):
     f = dict(year=qint(qs, "year", D.today().year), month=qint(qs, "month") or None,
-             dept=q1(qs, "dept") or None, location=q1(qs, "location") or None,
+             dept=_scoped_dept(user, q1(qs, "dept") or None), location=q1(qs, "location") or None,
              report_type=q1(qs, "report_type") or None, risk_level=q1(qs, "risk_level") or None)
     rows = D.location_hotspots(free=True, **f)[:D.FREE_LIMITS["locations"]]
     out = io.StringIO()
@@ -3104,14 +3318,22 @@ def csv_hotspots(user, qs):
 def csv_summary(user, qs):
     yr = qint(qs, "year", D.today().year)
     mo = qint(qs, "month") or None
-    dept = q1(qs, "dept") or None
+    dept = _scoped_dept(user, q1(qs, "dept") or None)
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["Section", "Name", "Total", "Incidents", "HIDs", "NearMisses", "HighPotential", "Open", "Overdue", "Extra"])
-    for r in D.dept_summary(year=yr, month=mo, free=True)[:D.FREE_LIMITS["departments"]]:
+    dept_rows = D.dept_summary(year=yr, month=mo, free=True)
+    if dept:
+        dept_rows = [r for r in dept_rows if r["dept_key"] == dept]
+    for r in dept_rows[:D.FREE_LIMITS["departments"]]:
         w.writerow(["Department", "%s - %s" % (r["adinkra_name"], r["department"]), r["total"], r["incidents"],
                     r["hids"], r["near_misses"], r["high_potential"], r["open_actions"], r["overdue_actions"], "points=%d" % r["points"]])
-    for r in D.contractor_summary(year=yr, month=mo, free=True)[:D.FREE_LIMITS["contractors"]]:
+    contractor_rows = D.contractor_summary(year=yr, month=mo, free=True)
+    if dept:
+        dept_companies = {u.get("company_id") for u in D.DB["users"]
+                          if u.get("dept_key") == dept and u.get("company_id")}
+        contractor_rows = [r for r in contractor_rows if r.get("company_id") in dept_companies]
+    for r in contractor_rows[:D.FREE_LIMITS["contractors"]]:
         w.writerow(["Contractor", r["name"], r["total"], r["incidents"], r["hids"], r["near_misses"],
                     r["high_potential"], r["open_actions"], r["overdue_actions"], "damage=%d" % r["damage"]])
     w.writerow([])
@@ -3122,10 +3344,17 @@ def csv_summary(user, qs):
 
 
 def csv_ai(user, qs):
+    dept = _scoped_dept(user, q1(qs, "dept") or None)
+    contractor = q1(qs, "contractor") or None
+    if dept:
+        dept_contractors = {u.get("company_id") for u in D.DB["users"]
+                            if u.get("dept_key") == dept and u.get("company_id")}
+        if contractor and D.contractor_id_from_value(contractor) not in dept_contractors:
+            contractor = None
     res = D.ai_predict(year=qint(qs, "year", D.today().year), month=qint(qs, "month", D.today().month),
                        period=q1(qs, "period", "month"), week=qint(qs, "week"),
-                       dept=q1(qs, "dept") or None, location=q1(qs, "location") or None,
-                       contractor=q1(qs, "contractor") or None, equipment=q1(qs, "equipment") or None,
+                       dept=dept, location=q1(qs, "location") or None,
+                       contractor=contractor, equipment=q1(qs, "equipment") or None,
                        activity=q1(qs, "activity") or None, free=True)
     out = io.StringIO()
     w = csv.writer(out)
@@ -3222,7 +3451,7 @@ ROUTE_GUARDS = {
     "/rewards": lambda u: has_any_perm(u, "reward.view_eligibility", "reward.finance_approve"),
     "/rewards/approvals": lambda u: False,
     "/rewards/releases": lambda u: has_any_perm(u, "reward.finance_approve", "reward.finance_reject", "reward.release"),
-    "/reports": lambda u: has_any_perm(u, "report.view_department", "report.view_company"),
+    "/reports": lambda u: D.has_perm(u, "report.view_company"),
     "/budgets": lambda u: D.can_view_budget(u),
     "/admin": lambda u: has_any_perm(u, "user.manage", "role.manage"),
     "/hotspots": lambda u: has_any_perm(u, "hse.module", "report.view_company"),
@@ -3230,6 +3459,15 @@ ROUTE_GUARDS = {
     "/summary": lambda u: has_any_perm(u, "report.view_department", "report.view_company"),
     "/quality": lambda u: D.has_perm(u, "hse.module"),
     "/ai": lambda u: has_any_perm(u, "hse.module", "report.view_company"),
+}
+
+CSV_ROUTE_GUARDS = {
+    "/points.csv": lambda u: has_any_perm(u, "reward.view_eligibility", "report.view_department", "report.view_company"),
+    "/leaderboard.csv": lambda u: has_any_perm(u, "reward.view_eligibility", "report.view_department", "report.view_company"),
+    "/reports.csv": lambda u: D.has_perm(u, "report.view_company"),
+    "/hotspots.csv": lambda u: has_any_perm(u, "hse.module", "report.view_company"),
+    "/summary.csv": lambda u: has_any_perm(u, "report.view_department", "report.view_company"),
+    "/ai.csv": lambda u: has_any_perm(u, "hse.module", "report.view_company"),
 }
 
 
@@ -3323,9 +3561,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_redirect("/login")
 
         if path in CSV_ROUTES:
-            if path == "/reports.csv" and not has_any_perm(user, "report.view_department", "report.view_company"):
-                return self.send_forbidden(user, path)
-            if path == "/points.csv" and not has_any_perm(user, "reward.view_eligibility", "report.view_department", "report.view_company"):
+            guard = CSV_ROUTE_GUARDS.get(path)
+            if guard and not guard(user):
                 return self.send_forbidden(user, path)
             filename, text = CSV_ROUTES[path](user, qs)
             return self.send_csv(filename, text)
@@ -3351,8 +3588,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/login":
             employee_id = (q1(form, "employee_id") or "").strip()
             password = (q1(form, "password") or "").strip()
+            login_key = _login_key(employee_id, self.client_address[0] if self.client_address else "")
+            if _login_blocked(login_key):
+                return self.send_redirect("/login?m=Too+many+failed+attempts.+Wait+10+minutes+and+try+again.")
             login_user = D.employee_by_employee_id(employee_id)
             if login_user and login_user.get("active", True) and D.valid_login_password(login_user, password):
+                _clear_login_attempts(login_key)
                 token = secrets.token_urlsafe(24)
                 SESSIONS[token] = login_user["id"]
                 D.record_audit(login_user, "login", "auth", login_user["id"], None,
@@ -3364,6 +3605,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            _record_failed_login(login_key)
             return self.send_redirect("/login?m=Invalid+Employee+ID+or+password")
 
         user = self.current_user()
